@@ -128,6 +128,32 @@ class TestGate3Ledger(unittest.TestCase):
         self.assertEqual(res["status"], "REBOUND_CONFIRMED")
         self.assertGreater(res["rebound_delta"], 1.0)
 
+    def test_verify_stale_entry_expires(self):
+        # Entry from 30 days ago with no subsequent data should expire instead of staying pending
+        stale_date = "2026-08-01"
+        ledger.add_ledger_entry(
+            db_path=self.ledger_db,
+            trigger_metric="hrv_score",
+            attributed_cause="Old stressor",
+            intervention_type="Physiological sigh",
+            date_str=stale_date,
+            deviation_sigma=-1.8,
+        )
+        empty_health_db = Path(self.temp_dir) / "empty_health.db"
+        import_samsung.init_db(empty_health_db)
+
+        results = ledger.verify_next_day_recovery(
+            db_path=self.ledger_db,
+            health_db_path=empty_health_db,
+        )
+        self.assertEqual(len(results), 0)
+
+        conn = ledger.init_ledger_db(self.ledger_db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM stress_ledger WHERE date = ?", (stale_date,)).fetchone()
+        conn.close()
+        self.assertEqual(row["rebound_status"], "EXPIRED_NO_DATA")
+
     def test_verify_sleep_fragmentation_rebound_directionality(self):
         checkin_date = "2026-09-15"
         # Sleep fragmentation spiked to +2.0 sigma

@@ -93,9 +93,9 @@ def run_pipeline(
     if not eval_result.get("dispatch_trigger"):
         return pipeline_report
 
-    # Check quiet hours & once-per-day limit
-    now = datetime.now(timezone.utc)
-    if not ignore_quiet_hours and not baseline_math.check_quiet_hours(now):
+    # Check quiet hours & once-per-day limit using user's local time
+    now_local = datetime.now().astimezone()
+    if not ignore_quiet_hours and not baseline_math.check_quiet_hours(now_local):
         pipeline_report["step_2_detection"]["dispatch_suppressed"] = "Quiet hours"
         return pipeline_report
 
@@ -142,7 +142,7 @@ def main() -> int:
     parser.add_argument("--state-file", default=".state/dispatch_state.json", help="Path to state file")
     parser.add_argument("--mock-reply", help="Mock user reply string")
     parser.add_argument("--interactive", action="store_true", help="Interactive terminal dialogue")
-    parser.add_argument("--ignore-quiet-hours", action="store_true", default=True, help="Bypass quiet hours")
+    parser.add_argument("--ignore-quiet-hours", action="store_true", default=False, help="Bypass quiet hours")
     parser.add_argument("--recap", action="store_true", help="Print weekly trend recap and exit")
 
     args = parser.parse_args()

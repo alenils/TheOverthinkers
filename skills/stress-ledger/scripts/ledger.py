@@ -162,6 +162,17 @@ def verify_next_day_recovery(
             )
 
             if not target_rec:
+                days_pending = (datetime.now(timezone.utc) - dt_checkin.replace(tzinfo=timezone.utc)).days
+                if days_pending > 7:
+                    conn.execute(
+                        """
+                        UPDATE stress_ledger
+                        SET rebound_status = 'EXPIRED_NO_DATA',
+                            verified_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_iso, rec_id),
+                    )
                 continue
 
             metric_key = row["trigger_metric"]

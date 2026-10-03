@@ -82,7 +82,7 @@ def check_daily_dispatch(state_path: Path, date_str: str) -> bool:
 
 
 def record_dispatch(state_path: Path, date_str: str) -> None:
-    """Record a dispatched check-in for idempotency."""
+    """Record a dispatched check-in for idempotency using atomic file replacement."""
     state_path.parent.mkdir(parents=True, exist_ok=True)
     data: Dict[str, Any] = {"dispatched_dates": []}
     if state_path.is_file():
@@ -92,7 +92,10 @@ def record_dispatch(state_path: Path, date_str: str) -> None:
             pass
     if date_str not in data.setdefault("dispatched_dates", []):
         data["dispatched_dates"].append(date_str)
-    state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    tmp_path = state_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp_path.replace(state_path)
 
 
 def detect_rumination(text: str) -> bool:
