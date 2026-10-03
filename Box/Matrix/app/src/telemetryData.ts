@@ -1,5 +1,7 @@
-export const INITIAL_DATA = {
-  timestamp: new Date().toISOString(),
+import { StatusData } from "./types";
+
+export const INITIAL_DATA: StatusData = {
+  timestamp: "2026-10-03T17:00:00Z",
   agent: {
     name: "The Overthinkers Coach",
     persona: "The Self-Distanced Observer",
@@ -19,7 +21,6 @@ export const INITIAL_DATA = {
   },
   gateway: {
     running: true,
-    pid: 91611,
     status: "active (running)",
   },
   cron_jobs: [
@@ -93,7 +94,6 @@ export const INITIAL_DATA = {
     has_soul: true,
     has_user: true,
     has_memory: true,
-    memory_preview: "Tracks active stressors and verified intervention efficacy under context rent.",
   },
   quick_commands: [
     {

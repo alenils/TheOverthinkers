@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 """Generates live status JSON for the Matrix OS Hermes Control Center app."""
 
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
 import subprocess
-from typing import Any, Dict, List
-import yaml
+import sys
+from typing import Any, Dict, List, Tuple
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+sys.path.insert(0, str(PROJECT_ROOT / "skills" / "stress-ledger" / "scripts"))
+
+try:
+    import ledger
+except ImportError:
+    ledger = None
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 HEALTH_DIR = Path(os.environ.get("HEALTH_DIR", Path.home() / "health"))
-APPS_DIR = Path.home() / "apps" / "hermes"
+APPS_DIR = Path(os.environ.get("MATRIX_APPS_DIR", Path.home() / "apps" / "hermes"))
 
 
 def get_gateway_info() -> Dict[str, Any]:
@@ -20,10 +35,42 @@ def get_gateway_info() -> Dict[str, Any]:
         res = subprocess.run(["pgrep", "-f", "hermes.*gateway run"], capture_output=True, text=True)
         pids = [int(p) for p in res.stdout.strip().split() if p.isdigit()]
         if pids:
-            return {"running": True, "pid": pids[0], "status": "active (running)"}
+            return {"running": True, "status": "active (running)"}
     except Exception:
         pass
-    return {"running": False, "pid": None, "status": "inactive"}
+    return {"running": False, "status": "inactive"}
+
+
+def parse_simple_yaml(text: str) -> Dict[str, Any]:
+    """Pure-python line-by-line fallback parser when PyYAML is not installed."""
+    result: Dict[str, Any] = {}
+    stack: List[Tuple[int, Dict[str, Any]]] = [(-1, result)]
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip() or ":" not in line:
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        key, val = line.strip().split(":", 1)
+        key = key.strip()
+        val = val.strip()
+
+        while len(stack) > 1 and stack[-1][0] >= indent:
+            stack.pop()
+
+        current_dict = stack[-1][1]
+        if not val:
+            new_dict: Dict[str, Any] = {}
+            current_dict[key] = new_dict
+            stack.append((indent, new_dict))
+        else:
+            cleaned = val.strip("'\"")
+            if cleaned.lower() == "true":
+                current_dict[key] = True
+            elif cleaned.lower() == "false":
+                current_dict[key] = False
+            else:
+                current_dict[key] = cleaned
+    return result
 
 
 def get_config_info() -> Dict[str, Any]:
@@ -31,30 +78,34 @@ def get_config_info() -> Dict[str, Any]:
     if not cfg_path.is_file():
         return {}
     try:
-        return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        content = cfg_path.read_text(encoding="utf-8")
+        if yaml:
+            return yaml.safe_load(content) or {}
+        return parse_simple_yaml(content)
     except Exception:
         return {}
 
 
 def get_cron_jobs() -> List[Dict[str, Any]]:
-    jobs = []
+    jobs: List[Dict[str, Any]] = []
     try:
         res = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True)
         lines = res.stdout.splitlines()
         current_job: Dict[str, Any] = {}
         for line in lines:
             line_str = line.strip()
-            if re.match(r"^[0-9a-f]{8,}\s+\[active\]", line_str):
-                if current_job:
+            match = re.match(r"^([0-9a-f]{8,})\s+\[([a-z]+)\]", line_str)
+            if match:
+                if current_job.get("id"):
                     jobs.append(current_job)
-                current_job = {"id": line_str.split()[0], "status": "active"}
+                current_job = {"id": match.group(1), "status": match.group(2)}
             elif line_str.startswith("Name:"):
                 current_job["name"] = line_str.split(":", 1)[1].strip()
             elif line_str.startswith("Schedule:"):
                 current_job["schedule"] = line_str.split(":", 1)[1].strip()
             elif line_str.startswith("Next run:"):
                 current_job["next_run"] = line_str.split(":", 1)[1].strip()
-        if current_job:
+        if current_job.get("id"):
             jobs.append(current_job)
     except Exception:
         pass
@@ -64,8 +115,14 @@ def get_cron_jobs() -> List[Dict[str, Any]]:
 def get_ledger_data() -> Dict[str, Any]:
     ledger_db = HEALTH_DIR / "data" / "ledger.db"
     if not ledger_db.is_file():
-        return {"total_entries": 0, "entries": []}
+        return {
+            "total_entries": 0,
+            "confirmed_rebounds": 0,
+            "recovery_rate_pct": 0.0,
+            "entries": [],
+        }
     try:
+        rep = ledger.get_ledger_report(ledger_db) if ledger else {}
         conn = sqlite3.connect(str(ledger_db))
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -79,29 +136,39 @@ def get_ledger_data() -> Dict[str, Any]:
             """
         ).fetchall()
         entries = [dict(r) for r in rows]
-        total = conn.execute("SELECT COUNT(*) FROM stress_ledger").fetchone()[0]
-        confirmed = conn.execute("SELECT COUNT(*) FROM stress_ledger WHERE rebound_status = 'REBOUND_CONFIRMED'").fetchone()[0]
         conn.close()
         return {
-            "total_entries": total,
-            "confirmed_rebounds": confirmed,
-            "recovery_rate_pct": round((confirmed / total * 100), 1) if total > 0 else 0.0,
+            "total_entries": rep.get("total_entries", len(entries)),
+            "confirmed_rebounds": rep.get("confirmed_rebounds", 0),
+            "recovery_rate_pct": rep.get("overall_success_rate_pct", 0.0),
             "entries": entries,
         }
     except Exception as e:
-        return {"error": str(e), "total_entries": 0, "entries": []}
+        return {
+            "error": str(e),
+            "total_entries": 0,
+            "confirmed_rebounds": 0,
+            "recovery_rate_pct": 0.0,
+            "entries": [],
+        }
 
 
 def get_memory_info() -> Dict[str, Any]:
-    mem_p = HERMES_HOME / "memories" / "MEMORY.md"
-    user_p = HERMES_HOME / "memories" / "USER.md"
-    soul_p = HERMES_HOME / "SOUL.md"
-    return {
-        "has_soul": soul_p.is_file(),
-        "has_user": user_p.is_file(),
-        "has_memory": mem_p.is_file(),
-        "memory_preview": mem_p.read_text(encoding="utf-8")[:400] if mem_p.is_file() else "",
-    }
+    try:
+        mem_p = HERMES_HOME / "memories" / "MEMORY.md"
+        user_p = HERMES_HOME / "memories" / "USER.md"
+        soul_p = HERMES_HOME / "SOUL.md"
+        return {
+            "has_soul": soul_p.is_file(),
+            "has_user": user_p.is_file(),
+            "has_memory": mem_p.is_file(),
+        }
+    except Exception:
+        return {
+            "has_soul": False,
+            "has_user": False,
+            "has_memory": False,
+        }
 
 
 def generate_status() -> Dict[str, Any]:
@@ -113,7 +180,7 @@ def generate_status() -> Dict[str, Any]:
     skills_cfg = cfg.get("skills", {}).get("config", {})
 
     status = {
-        "timestamp": subprocess.getoutput("date -u +'%Y-%m-%dT%H:%M:%SZ'"),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "agent": {
             "name": "The Overthinkers Coach",
             "persona": "The Self-Distanced Observer",
@@ -214,7 +281,6 @@ def main() -> None:
     data = generate_status()
     json_str = json.dumps(data, indent=2)
 
-    # Write to local public & dist dirs if present
     for target in [APPS_DIR / "public" / "status.json", APPS_DIR / "dist" / "status.json"]:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json_str, encoding="utf-8")
