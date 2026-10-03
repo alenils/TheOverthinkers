@@ -57,7 +57,7 @@ The loop is grounded in 5 clinical & cognitive frameworks:
 5. **RESCRIPT**: Imagery rescripting (healthy adult intervention).
 6. **TRACK**: Post-dialogue re-scoring, emotional delta logging, and wearable normalization.
 
-For the full specification and research backing, see [stress-dialogue-loop.md](./stress-dialogue-loop.md) and [Diagram.md](./Diagram.md).
+For the full specification and research backing, see [stress-dialogue-loop.md](./Research/stress-dialogue-loop.md), [Ieva Diagram.md](./Research/Ieva%20Diagram.md), and [Plan/PLAN.md](./Plan/PLAN.md).
 
 ---
 
@@ -83,10 +83,14 @@ For a full step-by-step walkthrough, see [ONBOARDING.md](./ONBOARDING.md).
 │   ├── README.md                     # Provider cookbook catalog
 │   └── Matrix/
 │       └── matrix-box-cookbook.md    # Agent-executable cookbook for Matrix OS
-├── Diagram.md                        # Wearable data analysis & intervention flowchart
 ├── ONBOARDING.md                     # Step-by-step setup guide
+├── Plan/
+│   └── PLAN.md                       # Vertical delivery plan & ship gates
 ├── README.md                         # Project overview
-└── stress-dialogue-loop.md           # Research debrief and implementation specification
+├── Research/
+│   ├── Ieva Diagram.md               # Wearable data analysis & intervention flowchart
+│   └── stress-dialogue-loop.md       # Research debrief and implementation specification
+└── scripts/                          # Validation and leak detection tooling
 ```
 
 ## License

@@ -117,7 +117,7 @@ hermes
 ```
 
 Run a test scenario to trigger the loop:
-> *"My wearable showed an HRV dip this morning and my resting HR is up by 6 bpm. Let's do the stress dialogue loop."*
+> *"My wearable showed an HRV dip this morning and my resting HR is elevated. Let's do the stress dialogue loop."*
 
 Observe the agent transition through the stages:
 1. **Detect**: Clarifying biometric anomaly vs workout or physiological confounders.

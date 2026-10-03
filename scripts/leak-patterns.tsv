@@ -1,0 +1,18 @@
+# leak-patterns.tsv — the SHAPE denylist the leak gate applies to this repo.
+#
+# Format: NAME<TAB>EXTENDED_REGEX ('#' comments and blank lines ignored). PCRE.
+
+# --- shape-based: identifier slots -------------------------------------------------------
+profile-path	(?i)\bprofiles/[a-z0-9_-]+
+
+# --- shape-based: work as shipped --------------------------------------------------------
+telegram-id	\b\d{9,10}\b
+ssh-key	\b[a-z0-9_.-]+\.pem\b
+absolute-home	\b/home/(?!ubuntu/)[a-z][a-z0-9_-]*/
+local-endpoint	\blocalhost:\d{2,5}\b
+contact-email	[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}
+health-dir	\bHEALTH/
+
+# --- personal measurements: a marker next to a number, or a number with a body unit ------
+health-marker	\b(?i:ferritin|vo2max|rmssd|hba1c|testosterone|creatinine)\b(?!\s*,?\s*\d+\s*Hz)[^0-9\n|]{0,12}\b[0-9]+(?:\.[0-9]+)?\b
+health-unit	[0-9]+\s?(kg|cm|bpm|kcal)\b

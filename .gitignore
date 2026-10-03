@@ -1,0 +1,28 @@
+# Staging and temp
+/staging/
+/.tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Secrets and local environment
+.env
+.env.*
+
+# Local databases and health stores (Gate 1 & Gate 3)
+*.db
+*.sqlite
+*.sqlite3
+data/
+health/
+stress-data/
+
+# Backups and node modules
+*.bak*
+node_modules/
+
+# Agent local state
+.mimocode/
+.commandcode/
+.agents/
