@@ -20,7 +20,7 @@ The peer runs from the project root and has full file access — reference files
 ${CLAUDE_SKILL_DIR}/scripts/peer-review.sh "${CLAUDE_SKILL_DIR}" "<YOUR_PROMPT>"
 ```
 
-Set `cd` to the project root. Set `timeout_ms` to **300000** (5 minutes). If exit code is **3** (no CLI found), fall back to `spawn_agent` with the same prompt.
+Set `cd` to the project root. Set `timeout_ms` to **900000** (15 minutes / 900 seconds). If exit code is **3** (no CLI found), fall back to `spawn_agent` with the same prompt.
 
 ### After the peer replies
 

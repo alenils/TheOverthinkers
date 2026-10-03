@@ -55,16 +55,17 @@ run_timeout() {
 try_cli() {
     local cli="$1"; shift
     local prompt_file="$1"; shift
+    local timeout_sec="${PEER_REVIEW_TIMEOUT:-900}"
 
     case "$cli" in
         command-code)
-            run_timeout 180 command-code -p "$(cat "$prompt_file")" --tools-all --skip-onboarding -t </dev/null 2>/dev/null
+            run_timeout "$timeout_sec" command-code -p "$(cat "$prompt_file")" --tools-all --skip-onboarding -t </dev/null 2>/dev/null
             ;;
         agy)
-            run_timeout 180 agy -p "$(cat "$prompt_file")" --dangerously-skip-permissions --print-timeout 180s </dev/null 2>/dev/null
+            run_timeout "$timeout_sec" agy -p "$(cat "$prompt_file")" --dangerously-skip-permissions --print-timeout "${timeout_sec}s" </dev/null 2>/dev/null
             ;;
         mimo)
-            run_timeout 180 mimo run "$(cat "$prompt_file")" </dev/null 2>/dev/null
+            run_timeout "$timeout_sec" mimo run "$(cat "$prompt_file")" </dev/null 2>/dev/null
             ;;
         *)
             return 1

@@ -23,7 +23,7 @@ Frame the request as a prompt:
 ${HERMES_SKILL_DIR}/scripts/peer-review.sh "your prompt here"
 ```
 
-Use the **terminal** tool to run the script. Set a **5-minute timeout** (300 seconds).
+Use the **terminal** tool to run the script. Set a **15-minute timeout** (900 seconds).
 
 ### Fallback chain
 
