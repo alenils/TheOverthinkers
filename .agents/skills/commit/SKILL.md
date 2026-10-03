@@ -46,8 +46,9 @@ or
 - `gate-1`: Rolling baseline, confounder engine, wearable imports
 - `gate-2`: Cognitive appraisal, action triage, stress dialogue
 - `gate-3`: Closed-loop outcome ledger and personal model
-- `skills`: Hermes or Claude skill definitions
+- `skills`: Hermes or Zed agent skill definitions
 - `profile`: SOUL, USER, or MEMORY scaffolding
+- `security`: Leak gate, gitleaks rules, security scanning
 - `box`: Matrix OS cloud box configuration
 
 **Prefix by mode:**
@@ -63,7 +64,7 @@ or
 
 1. **Imperative mood**: "implement mock trigger" not "implemented mock trigger"
 2. **Why, not what**: "add timeout fallback (macOS lacks gtimeout by default)" not "update timeout"
-3. **No attribution**: Never add co-author, "Generated with Claude", or "Co-Authored-By" lines
+3. **No attribution**: Never add co-author, "Generated with...", or "Co-Authored-By" lines
 4. **Subject under 72 chars**, body wrapped at 72 chars when rationale is needed.
 5. **Leak prevention rule**: Never include raw biometric measurements (e.g. concrete heart rate or HRV numbers) or private handles in commit messages! Use descriptive terms like "elevated resting HR" or "HRV anomaly".
 
@@ -136,13 +137,17 @@ python3 scripts/validate-skills.py .
 
 **On failure**: report the validation errors and **stop**. Verify YAML frontmatter, parent directory naming, declared config keys, and relative markdown links.
 
-### 4. Blocking: Python Syntax Validation
+### 4. Blocking: Python Syntax & Automated Test Suite
 
 ```bash
+# Syntax compile check on all changed/untracked python files
 { git diff --name-only HEAD -- '*.py'; git ls-files --others --exclude-standard -- '*.py'; } | sort -u | xargs -r python3 -m py_compile
+
+# Run full automated test suite (all vertical ship gates)
+python3 -m unittest discover tests
 ```
 
-**On failure**: report the failing file and line, **stop**. Fix Python syntax errors before committing.
+**On failure**: report the failing file and line, **stop**. Fix Python syntax or failing unit tests before committing.
 
 ### 5. Blocking: Pre-staged Files Check
 
@@ -214,6 +219,7 @@ The workflow runs `git reset --soft origin/main` — all changes are staged. **`
    - `./scripts/leak-scan.sh .`
    - `python3 scripts/validate-skills.py .`
    - `git diff --cached --name-only -- '*.py' | xargs -r python3 -m py_compile`
+   - `python3 -m unittest discover tests`
 3. If checks fail or nothing staged → report error and stop.
 
 ## CI Step 2: Plan Commits
