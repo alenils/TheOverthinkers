@@ -43,10 +43,26 @@ Status should be `active (running)`.
 
 ---
 
-## 3. Configure Model Credentials
+## 3. Configure Model & Audio Credentials
 
-Configure your preferred LLM provider:
+Configure your preferred LLM and TTS provider:
 
+### Google Gemini (Recommended for fast reasoning & native audio)
+```bash
+# Set your Google API key in ~/.hermes/.env:
+echo "GOOGLE_API_KEY=<YOUR_KEY>" >> ~/.hermes/.env
+
+# Configure inference model to Gemini 3.8 Flash
+hermes config set model.provider gemini
+hermes config set model.default gemini-3.8-flash
+
+# (Optional) Enable native Gemini TTS audio for voice notes & audio output
+hermes config set tts.provider gemini
+hermes config set tts.gemini.model gemini-3.8-flash-tts
+hermes config set tts.gemini.voice Kore
+```
+
+### Alternative: OpenRouter or Anthropic
 ```bash
 # Interactive selection
 hermes model
@@ -153,7 +169,7 @@ Verify the system end-to-end across the Phase 1 vertical gates:
 Test the mock trigger and 3rd-person observer check-in:
 
 ```bash
-python3 ~/overthinkers/scripts/simulate_trigger.py --metric hrv --drop 22
+python3 ~/overthinkers/scripts/simulate_trigger.py --metric hrv --deviation -2.2 --interactive
 ```
 
 Expected output: An outbound check-in using 3rd-person self-distancing framing (*"Biometrics show an autonomic dip today. Looking at your day from the outside, what's taking up your bandwidth?"*), capturing user reply, and closing the session in $\le 2$ turns.
@@ -179,7 +195,7 @@ Launch an interactive Hermes session:
 hermes
 ```
 
-### Step 7E: Verify WhatsApp & Gemini 3.8 Voice Gateway
+### Step 7E: Verify WhatsApp & Gemini 3.8 Voice Gateway (Optional)
 Test an end-to-end simulated check-in dispatched directly to your phone via WhatsApp:
 
 ```bash
@@ -190,6 +206,13 @@ Hermes sends the morning check-in to your WhatsApp chat. Reply with text or an a
 - Voice notes are transcribed in ~0.4s using `gemini-3.8-flash` via `google-genai`.
 - Hermes runs the Gate 2 cognitive appraisal triage and replies back with 1 actionable micro-step.
 - The check-in is logged to `data/ledger.db` on your Matrix box.
+
+### Step 7F: Inspect Matrix OS Desktop Control Center (GUI)
+If running on Matrix OS, click the **Hermes Agent** app icon on your Matrix desktop:
+- **Live System Telemetry**: Monitors Gemini 3.8 Flash, gateway status, and quiet hours.
+- **How It Works**: Interactive visual explainer of the 80/20 delivery gates and `Diagram.md` appraisal matrix.
+- **Interactive Simulator**: Step-by-step interactive simulator walking through real-time check-in and confounder evaluation.
+- **Outcome Ledger Feed**: Live table reflecting recovery rebounds from `~/health/data/ledger.db`.
 
 Run a test dialogue to engage the coach:
 > *"Morning. Biometrics show an autonomic dip. Looking at things from the outside, what's taking up your bandwidth?"*

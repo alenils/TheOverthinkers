@@ -395,7 +395,7 @@ The automated box setup is complete. The remaining steps are personal:
    Launch an interactive terminal via `matrix shell` or the Matrix web console:
    ```bash
    # Test Gate 0 Steel Thread trigger simulation
-   python3 ~/overthinkers/scripts/simulate_trigger.py --metric hrv --drop 22
+   python3 ~/overthinkers/scripts/simulate_trigger.py --metric hrv --deviation -2.2 --interactive
 
    # Test Gate 3 Outcome Ledger recap
    python3 ~/overthinkers/scripts/orchestrator.py --recap
