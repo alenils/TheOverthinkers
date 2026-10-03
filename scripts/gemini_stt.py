@@ -6,10 +6,20 @@ import os
 from pathlib import Path
 import sys
 
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+    _HAS_GENAI = True
+except ImportError:
+    genai = None  # type: ignore[assignment]
+    types = None  # type: ignore[assignment]
+    _HAS_GENAI = False
+
 
 def transcribe(input_path: Path, output_dir: Path) -> str:
+    if not _HAS_GENAI:
+        raise ImportError("google-genai is required for Gemini STT. Install via: pip install google-genai")
+
     env_file = Path.home() / ".hermes" / ".env"
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key and env_file.is_file():

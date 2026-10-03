@@ -179,6 +179,18 @@ Launch an interactive Hermes session:
 hermes
 ```
 
+### Step 7E: Verify WhatsApp & Gemini 3.8 Voice Gateway
+Test an end-to-end simulated check-in dispatched directly to your phone via WhatsApp:
+
+```bash
+python3 ~/overthinkers/scripts/e2e_whatsapp_demo.py --recipient <YOUR_PHONE_NUMBER>
+```
+
+Hermes sends the morning check-in to your WhatsApp chat. Reply with text or an audio voice note:
+- Voice notes are transcribed in ~0.4s using `gemini-3.8-flash` via `google-genai`.
+- Hermes runs the Gate 2 cognitive appraisal triage and replies back with 1 actionable micro-step.
+- The check-in is logged to `data/ledger.db` on your Matrix box.
+
 Run a test dialogue to engage the coach:
 > *"Morning. Biometrics show an autonomic dip. Looking at things from the outside, what's taking up your bandwidth?"*
 

@@ -347,7 +347,45 @@ Matrix desktop:
    Add the app entry (`apps/hermes/index.html`) to the desktop icon grid via the OS-view state API
    or using the `add_app_to_desktop` tool in Matrix OS. The icon will appear live on your Matrix desktop.
 
-### B8 — ⛔ handback (human takes over)
+### B8 — connect WhatsApp & enable Gemini 3.8 Voice Gateway
+
+The Overthinkers operates seamlessly over WhatsApp using Hermes's built-in Baileys bridge and Google Gemini 3.8 for instantaneous voice transcription (STT) and voice note responses (TTS):
+
+1. **Configure WhatsApp port & permissions on Matrix OS**:
+   ```bash
+   matrix run --project=main -C . -- bash -lc '
+   # Route bridge to port 3010 to prevent collision with Matrix OS web desktop on port 3000
+   hermes config set platforms.whatsapp.bridge_port 3010
+   hermes config set platforms.whatsapp.enabled true
+   hermes config set approvals.mode off
+   echo "HERMES_YOLO_MODE=1" >> ~/.hermes/.env
+   echo "HERMES_ACCEPT_HOOKS=1" >> ~/.hermes/.env
+   '
+   ```
+
+2. **Enable Gemini 3.8 Flash STT & TTS**:
+   ```bash
+   matrix run --project=main -C . -- bash -lc '
+   hermes tools enable stt
+   hermes tools enable tts
+   hermes config set tts.provider gemini
+   hermes config set tts.gemini.model gemini-3.8-flash-tts
+   hermes config set tts.gemini.voice Kore
+   '
+   ```
+
+3. **Pair your WhatsApp account**:
+   Run the pairing helper script and scan the QR code from WhatsApp on your phone (**Settings → Linked Devices → Link a Device**):
+   ```bash
+   matrix run --project=main -C . -- bash -lc '~/overthinkers/scripts/pair_whatsapp.sh'
+   ```
+
+4. **Restart gateway**:
+   ```bash
+   matrix run --project=main -C . -- bash -lc 'hermes gateway restart'
+   ```
+
+### B9 — ⛔ handback (human takes over)
 
 The automated box setup is complete. The remaining steps are personal:
 
