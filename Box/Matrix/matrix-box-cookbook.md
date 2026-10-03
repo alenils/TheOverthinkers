@@ -200,32 +200,63 @@ matrix run --project=main -C overthinkers -- git rev-parse HEAD
 
 Write down the commit SHA — this records the exact version running on your Matrix box.
 
-### B5 — install companion skills & setup gateway
+### B5 — install The Overthinkers skills & run quality gates
 
-The Overthinkers system works alongside companion longevity and wearable ingestion skills
-(e.g., from `pridiuksson/highlander-longevity-coach` for Apple Health, Samsung Health, Garmin):
+The Overthinkers repository ships with 6 core skills under `skills/`:
+- `detect-baseline`: 28-day rolling baseline ($\mu \pm 1.5\sigma$) slope break detection and athletic strain confounder filter.
+- `stress-dialogue`: Cognitive appraisal triage (Distress vs. Eustress vs. Recovery Drain) with $\le 3$ turn ceiling.
+- `stress-ledger`: Closed-loop outcome ledger, next-day biometric rebound verification, and `MEMORY.md` writeback.
+- `samsung-health-import`: Parser and SQLite normalizer for Samsung Health export archives.
+- `garmin-import`: Parser and SQLite normalizer for Garmin Connect exports.
+- `peer-review`: Multi-agent gut check and quality review runner.
 
-1. **Backup existing skills on Matrix**:
+1. **Backup existing skills and check collisions**:
    ```bash
    matrix run --project=main -C . -- bash -c '
    backup_dir="$HOME/.hermes/skills.bak-$(date +%Y%m%d-%H%M%S)"
    [ -d "$HOME/.hermes/skills" ] && cp -r "$HOME/.hermes/skills" "$backup_dir"
+   existing=$(find -L "$HOME/.hermes/skills" -name SKILL.md -not -path "*/.archive/*" -exec grep -h "^name:" {} + 2>/dev/null | awk "{print \$2}" | sort -u)
+   incoming=$(find "$HOME/overthinkers/skills" -name SKILL.md -exec grep -h "^name:" {} + | awk "{print \$2}" | sort -u)
+   comm -12 <(echo "$existing") <(echo "$incoming")
+   '
+   ```
+   Matrix includes built-in web and UI template skills; verify that no naming collisions exist.
+
+2. **Install The Overthinkers skills into Hermes**:
+   ```bash
+   matrix run --project=main -C overthinkers -- bash -lc '
+   mkdir -p ~/.hermes/skills
+   cp -r skills/* ~/.hermes/skills/
    '
    ```
 
-2. **Optionally clone wearable importer & coach skills**:
+3. **(Optional) Install companion wearable skills**:
+   To ingest Apple Health, Whoop, or Oura data alongside Samsung and Garmin, optionally clone and copy companion skills from `pridiuksson/highlander-longevity-coach`:
    ```bash
    matrix run --project=main -C . -- bash -lc '
    if [ ! -d ~/highlander-longevity-coach ]; then
-     git clone https://github.com/pridiuksson/highlander-longevity-coach.git ~/highlander-longevity-coach
+     git clone https://github.com/pridiuksson/highlander-longevity-coach.git ~/highlander-longevity-coach 2>/dev/null || true
    fi
-   mkdir -p ~/.hermes/skills
-   # Copy wearable import and verification skills into Hermes
-   cp -r ~/highlander-longevity-coach/skills/* ~/.hermes/skills/ 2>/dev/null || true
+   if [ -d ~/highlander-longevity-coach/skills ]; then
+     cp -r ~/highlander-longevity-coach/skills/* ~/.hermes/skills/ 2>/dev/null || true
+   fi
    '
    ```
 
-3. **Restart the Hermes gateway**:
+4. **Run repository quality gates & automated test suite**:
+   ```bash
+   # Leak scan (zero biometric values, zero credentials)
+   matrix run --project=main -C overthinkers -- ./scripts/leak-scan.sh .
+
+   # Skill structural integrity check
+   matrix run --project=main -C overthinkers -- python3 scripts/validate-skills.py .
+
+   # Full automated test suite (30 unit tests across Gates 0-3)
+   matrix run --project=main -C overthinkers -- python3 -m unittest discover tests
+   ```
+   Expect `PASS` from `leak-scan.sh`, `OK` from `validate-skills.py`, and `Ran 30 tests ... OK`.
+
+5. **Restart the Hermes gateway**:
    ```bash
    matrix run --project=main -C . -- bash -lc '
    hermes gateway restart
@@ -234,22 +265,38 @@ The Overthinkers system works alongside companion longevity and wearable ingesti
    '
    ```
 
-### B6 — configure Hermes for The Overthinkers
+### B6 — configure Hermes & instantiate profiles
 
-Set the skill storage paths and proactive loop configuration in `~/.hermes/config.yaml`:
+Configure skill storage paths, quiet hours, and bootstrap the 3-Tier Profile architecture:
 
-```bash
-matrix run --project=main -C . -- bash -lc '
-hermes config set skills.config.health.health_dir ~/health
-hermes config set skills.config.health.baseline_doc ~/health/baseline.md
-hermes config set skills.config.proactive.timezone <TIMEZONE>
-hermes config set skills.config.proactive.quiet_hours "08:00-21:00"
-mkdir -p ~/health
-'
-```
+1. **Configure paths and quiet hours in Hermes**:
+   ```bash
+   matrix run --project=main -C . -- bash -lc '
+   hermes config set skills.config.health.health_dir ~/health
+   hermes config set skills.config.health.baseline_doc ~/health/baseline.md
+   hermes config set skills.config.stress.ledger_db ~/health/data/ledger.db
+   hermes config set skills.config.proactive.timezone <TIMEZONE>
+   hermes config set skills.config.proactive.quiet_hours "08:00-21:00"
+   mkdir -p ~/health/data ~/.hermes/memories
+   '
+   ```
 
-> **Note:** The warning `'skills.config....' is not a recognized config key` is normal (dynamic
-> skill keys are not in the static schema, but the values are persisted to `~/.hermes/config.yaml`).
+   > **Note:** The warning `'skills.config....' is not a recognized config key` is normal (dynamic
+   > skill keys are not in the static schema, but the values are persisted to `~/.hermes/config.yaml`).
+
+2. **Bootstrap the 3-Tier Profile**:
+   ```bash
+   matrix run --project=main -C . -- bash -lc '
+   # Tier 1: Canonical AI Persona (The Self-Distanced Observer)
+   cp ~/overthinkers/Profile/SOUL.md ~/.hermes/SOUL.md
+
+   # Tier 2: Durable Human Context Scaffold
+   cp ~/overthinkers/Profile/USER.md ~/.hermes/memories/USER.md
+
+   # Tier 3: Living Memory & Efficacy Ledger
+   cp ~/overthinkers/Profile/MEMORY.md ~/.hermes/memories/MEMORY.md
+   '
+   ```
 
 ### B7 — create the Hermes Agent Desktop App & Icon (Matrix OS GUI)
 
@@ -301,21 +348,42 @@ Matrix desktop:
 The automated box setup is complete. The remaining steps are personal:
 
 1. **Configure Personal Context**:
-   Create or edit `~/.hermes/SOUL.md` and `~/.hermes/memories/USER.md` with your personal baseline,
-   communication preferences, and stress response goals.
-2. **First Run (Interactive)**:
+   Review and customize `~/.hermes/memories/USER.md` with your wearable setup, training patterns, and quiet hours.
+2. **First Run & Gate Verification**:
    Launch an interactive terminal via `matrix shell` or the Matrix web console:
    ```bash
+   # Test Gate 0 Steel Thread trigger simulation
+   python3 ~/overthinkers/scripts/simulate_trigger.py --metric hrv --drop 22
+
+   # Test Gate 3 Outcome Ledger recap
+   python3 ~/overthinkers/scripts/orchestrator.py --recap
+
+   # Launch interactive Hermes session
    hermes
    ```
    Test the prompt:
-   *"I've been feeling elevated tension today. Can we run the stress dialogue loop?"*
-   Verify that Hermes engages the 6-stage stress dialogue loop (Detect → Ground → Dialogue → Map → Rescript → Track).
-3. **Proactive Check-in Wire**:
-   Check cron tasks:
-   ```bash
-   hermes cron list
-   ```
+   *"Morning. Biometrics show an autonomic dip. Looking at things from the outside, what's taking up your bandwidth?"*
+   Verify that Hermes engages the 80/20 behavioral coaching loop:
+   - Self-distanced 3rd-person observer framing
+   - Cognitive appraisal triage (Distress vs. Eustress vs. Recovery Drain)
+   - Bounded single micro-action commitment
+   - Strict $\le 3$ turn ceiling and anti-rumination circuit breaker
+   - Automatic logging to the closed-loop outcome ledger in `~/health/data/ledger.db`
+
+### B9 — schedule proactive daily morning check (Cron)
+
+Schedule the proactive baseline check so Hermes evaluates morning slope breaks at 08:00 daily (defaulting to silence unless an authentic anomaly crosses threshold):
+
+```bash
+matrix run --project=main -C . -- bash -lc '
+hermes cron add \
+  --name "overthinkers-morning-check" \
+  --schedule "0 8 * * *" \
+  --command "python3 $HOME/overthinkers/scripts/orchestrator.py"
+
+hermes cron list
+'
+```
 
 ---
 
