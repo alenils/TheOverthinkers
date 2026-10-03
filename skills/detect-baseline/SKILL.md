@@ -10,10 +10,10 @@ metadata:
     config:
       - key: health.health_db
         description: "Primary SQLite database for health data"
-        default: "~/health/health.db"
+        default: "~/.hermes/data/health.db"
       - key: health.garmin_db
         description: "Garmin SQLite database for health data"
-        default: "~/health/garmin.db"
+        default: "~/.hermes/data/garmin.db"
       - key: stress.baseline_window_days
         description: "Rolling baseline history window in days"
         default: "28"
@@ -36,7 +36,7 @@ Evaluates daily biometric records against individual rolling baselines (14 to 28
 ## Core Rules
 
 1. **Compare Against Own Baseline, Never Population Norms:**
-   Calculates rolling mean and standard deviation over an individual 14 to 28 day window. Triggers fire exclusively on slope breaks crossing $\pm 1.5\sigma$.
+   Calculates rolling mean and standard deviation over an individual 14 to 28 day window. Level and daily step-change thresholds are distinct heuristics. Daily deltas require consecutive same-source readings with nonzero variance; gaps use only level deviations.
 
 2. **Workout Confounder Interlock:**
    If the prior day recorded a high athletic load or workout strain jump, the autonomic dip is categorized as **Physical Recovery Strain**. The agent logs recovery status and stays completely silent.
@@ -51,3 +51,5 @@ Check a specific date:
 ```bash
 python3 ${HERMES_SKILL_DIR}/scripts/baseline_math.py check --date 2026-10-03 --db-path ${health.health_db}
 ```
+
+Keep source and metric definitions separate: Samsung inverted stress indices and Garmin HRV are not interchangeable. Require at least 14 valid readings per source and metric. Missing workout context or insufficient same-source workout history suppresses proactive outreach and retains explicit uncertainty. Physical load is a possible contributing factor, not a proven cause.

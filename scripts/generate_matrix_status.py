@@ -137,10 +137,13 @@ def get_ledger_data() -> Dict[str, Any]:
         ).fetchall()
         entries = [dict(r) for r in rows]
         conn.close()
+        verified_cnt = rep.get("verified_entries", 0)
+        confirmed_cnt = rep.get("confirmed_rebounds", 0)
+        calc_rate = round((confirmed_cnt / verified_cnt) * 100.0, 1) if verified_cnt > 0 else 0.0
         return {
             "total_entries": rep.get("total_entries", len(entries)),
-            "confirmed_rebounds": rep.get("confirmed_rebounds", 0),
-            "recovery_rate_pct": rep.get("overall_success_rate_pct", 0.0),
+            "confirmed_rebounds": confirmed_cnt,
+            "recovery_rate_pct": rep.get("overall_success_rate_pct", calc_rate),
             "entries": entries,
         }
     except Exception as e:

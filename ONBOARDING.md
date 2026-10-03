@@ -119,53 +119,32 @@ hermes skills list
 
 ---
 
-## 5. Configure Paths, Storage & Quiet Hours
+## 5. Install Profiles and Use One Runtime Home
 
-Configure Hermes to know where your biometric data, outcome ledger, and baselines reside:
-
-```bash
-hermes config set skills.config.health.health_dir   ~/health
-hermes config set skills.config.health.baseline_doc ~/health/baseline.md
-hermes config set skills.config.stress.ledger_db    ~/health/data/ledger.db
-hermes config set skills.config.proactive.timezone  <TIMEZONE>
-hermes config set skills.config.proactive.quiet_hours "08:00-21:00"
-
-mkdir -p ~/health/data ~/.hermes/memories
-```
-
-*(Note: Warnings about unrecognized config keys can be safely ignored — Hermes dynamically persists them to `~/.hermes/config.yaml`).*
-
----
-
-## 6. Instantiate Profiles & Living Context
-
-The Overthinkers uses a 3-tier profile architecture:
-- **Tier 1 (`SOUL.md`)**: The AI's mind and operational persona (The Self-Distanced Observer and The Concise Operator).
-- **Tier 2 (`USER.md`)**: The human's durable context (wearables, training profile, quiet hours, friction patterns).
-- **Tier 3 (`MEMORY.md`)**: The living efficacy ledger under context rent rules (tracking verified intervention recovery correlations).
-
-Bootstrap the profile files into Hermes:
+The installer, importer CLIs, orchestrator, and ledger share `HERMES_HOME`, falling back to `~/.hermes`. Repository `Profile/` files are generic templates. Runtime readings and populated memories stay outside the checkout.
 
 ```bash
-# 1. Install Tier 1 AI Persona
-cp ~/overthinkers/Profile/SOUL.md ~/.hermes/SOUL.md
-
-# 2. Install Tier 2 User Context Scaffold
-cp ~/overthinkers/Profile/USER.md ~/.hermes/memories/USER.md
-
-# 3. Install Tier 3 Living Efficacy Ledger
-cp ~/overthinkers/Profile/MEMORY.md ~/.hermes/memories/MEMORY.md
+python3 ~/overthinkers/scripts/install_runtime.py --dry-run
+python3 ~/overthinkers/scripts/install_runtime.py
+hermes skills list
 ```
 
-Edit `~/.hermes/memories/USER.md` with your personal wearable setup, training schedule, and quiet hours.
+The installer places `SOUL.md` at the runtime root, and `USER.md` plus `MEMORY.md` under `memories/`, matching Hermes 0.21.4. It preserves existing personalized files, migrates an older runtime `Profile/` scaffold if present, and backs up installed skills before replacing them. Review `SOUL.md` if an existing persona was preserved. Skill discovery and a human inspection of the loaded persona remain deployment acceptance checks.
 
----
+Defaults are `data/health.db`, `data/garmin.db`, `data/ledger.db`, and `state/` inside that home. Set Hermes skill configuration paths to the same runtime data paths when using the skills directly. For a custom home, export `HERMES_HOME` for the installer, Hermes, imports, daily process, and reply worker; explicit command-line paths override these defaults.
 
-## 7. Interactive Run & Gate Verification
+```bash
+export STRESS_TIMEZONE="<IANA_TIMEZONE>"
+export STRESS_ALLOWED_HOURS="08:00-21:00"
+```
+
+The Python runner reads these environment settings, not the Hermes `proactive` config keys. UTC is the fallback timezone. On Windows, a non-UTC IANA timezone requires the Python `tzdata` package.
+
+## 6. Test Explicit Mock Mode & Gate Verification
 
 Verify the system end-to-end across the Phase 1 vertical gates:
 
-### Step 7A: Verify Gate 0 (Steel Thread Simulation)
+### Step 6A: Verify Gate 0 (Steel Thread Simulation)
 Test the mock trigger and 3rd-person observer check-in:
 
 ```bash
@@ -174,28 +153,49 @@ python3 ~/overthinkers/scripts/simulate_trigger.py --metric hrv --deviation -2.2
 
 Expected output: An outbound check-in using 3rd-person self-distancing framing (*"Biometrics show an autonomic dip today. Looking at your day from the outside, what's taking up your bandwidth?"*), capturing user reply, and closing the session in $\le 2$ turns.
 
-### Step 7B: Verify Gate 1 (Baseline & Confounder Engine)
+### Step 6B: Verify Gate 1 (Baseline & Confounder Engine)
 Verify slope break detection and athletic strain suppression:
 
 ```bash
 python3 ~/overthinkers/scripts/baseline_math.py check --date $(date +%Y-%m-%d) --db-path ~/health/data/health.db
 ```
 
-### Step 7C: Verify Gate 3 (Outcome Ledger & Trend Recap)
+### Step 6C: Verify Gate 3 (Outcome Ledger & Trend Recap)
 View the weekly trend recap:
 
 ```bash
+python3 ~/overthinkers/scripts/simulate_trigger.py --interactive --ignore-quiet-hours
+python3 ~/overthinkers/scripts/orchestrator.py --interactive
 python3 ~/overthinkers/scripts/orchestrator.py --recap
 ```
 
-### Step 7D: First Interactive Coaching Session
-Launch an interactive Hermes session:
+Gate 0 uses repository profile templates to exercise a two-message mock dialogue; it does not prove Hermes loaded its runtime persona. Simulated alerts are labeled. Without an explicit mock reply or interactive input, sessions remain pending; EOF never creates invented user context. Gate 2 caps coach messages at three, including clarification and the proposal. Action acceptance requires a later reply; acceptance and reported completion are separate fields.
+
+The current runner uses deterministic appraisal rules. A separate `hermes` chat uses its configured model and persona; it does not automatically log that chat to this runner's ledger.
+
+## 7. Configure Telegram Delivery and Replies
+
+Create a Telegram bot and start a **private** conversation with it. Keep the bot token, intended chat ID, and intended user ID in a private environment file or secret manager outside the checkout. Export these variables to both the daily runner and reply worker:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_USER_ID`
+
+No credentials are needed for repository tests. The transport uses Telegram's [sendMessage and getUpdates API](https://core.telegram.org/bots/api). Polling requires no active webhook and **one poller per bot**. Replies must come from the configured user in the configured private chat, using Telegram's Reply function on the latest coach message; unrelated messages do not enter the session.
 
 ```bash
-hermes
+python3 ~/overthinkers/scripts/orchestrator.py --channel telegram
+python3 ~/overthinkers/scripts/orchestrator.py --poll
+# Or keep a supervised worker running to poll replies and expire unanswered sessions:
+python3 ~/overthinkers/scripts/orchestrator.py --watch
 ```
 
-### Step 7E: Verify WhatsApp & Gemini 3.8 Voice Gateway (Optional)
+The daily command requires imported wearable data and enough same-source history. Unknown workout context suppresses proactive outreach. It sends at most one opening per local day, reserves that limit before HTTP, and journals every outbound attempt. A failed/interrupted send stays `DELIVERY_UNCERTAIN` and is never automatically retried. Inspect private `state/messaging/` records before taking manual recovery action. Missing replies expire silently after one hour; run the worker to apply expiration. A restart replays durable replies without duplicate coach messages or ledger entries.
+
+The closing proposal may ask for confirmation within the existing message budget. A later confirmation updates acceptance/completion without another coach message. Vague statements, silence, and unrelated replies cannot establish completion.
+
+## 8. Configure WhatsApp & Gemini 3.8 Voice Gateway (Optional)
+
 Test an end-to-end simulated check-in dispatched directly to your phone via WhatsApp:
 
 ```bash
@@ -207,7 +207,8 @@ Hermes sends the morning check-in to your WhatsApp chat. Reply with text or an a
 - Hermes runs the Gate 2 cognitive appraisal triage and replies back with 1 actionable micro-step.
 - The check-in is logged to `data/ledger.db` on your Matrix box.
 
-### Step 7F: Inspect Matrix OS Desktop Control Center (GUI)
+## 9. Inspect Matrix OS Desktop Control Center (GUI)
+
 If running on Matrix OS, click the **Hermes Agent** app icon on your Matrix desktop:
 - **Live System Telemetry**: Monitors Gemini 3.8 Flash, gateway status, and quiet hours.
 - **How It Works**: Interactive visual explainer of the 80/20 delivery gates and `Diagram.md` appraisal matrix.
@@ -217,28 +218,19 @@ If running on Matrix OS, click the **Hermes Agent** app icon on your Matrix desk
 Run a test dialogue to engage the coach:
 > *"Morning. Biometrics show an autonomic dip. Looking at things from the outside, what's taking up your bandwidth?"*
 
-Observe the 80/20 behavioral coaching loop in action:
-1. **Self-Distanced Grounding**: The agent inspects the tension as an external strategist.
-2. **Cognitive Appraisal Triage**: Categorizes the friction into High Control (Eustress), Low Control (Distress), or Recovery Drain.
-3. **Single Micro-Action Commitment**: Suggests exactly 1 bounded tactical micro-action (physiological sigh, 15-minute walk, or task prioritization lock).
-4. **Anti-Rumination Circuit Breaker**: Strictly closes the loop within $\le 3$ conversational turns.
-5. **Outcome Logging**: Records the intervention into `~/health/data/ledger.db` for next-day biometric rebound verification.
+## 10. Daily Operation and Follow-Up Checks
 
----
+Schedule the daily command with `--channel telegram` in your chosen scheduler, ensuring it and the reply worker receive the same runtime home, timezone, and Telegram environment. Keep the reply worker supervised. The deterministic runner does not require Hermes model credentials.
 
-## 8. Schedule Proactive Daily Loop (Cron)
+Verification matches the next night's source and metric to the frozen trigger baseline. Missing follow-ups expire after 48 hours. Zero-variance baselines remain unverifiable. Old ledger schemas migrate additively; old records lacking provenance stay excluded from action summaries.
 
-To have Hermes automatically evaluate morning baseline slope breaks and proactively initiate a check-in when an authentic anomaly occurs (silence by default):
+Memory retains proposal counts, uncertainty, and excluded observations. Action summaries require at least five reported completed actions with real, matched follow-ups and verified context, grouped by source and metric. Biometric recovery is an observation, never proof the action caused it. Provider-specific units are kept separate; the current database has no within-provider device or measurement-version identifier, so use separate runtime data when changing those definitions.
 
 ```bash
-hermes cron add \
-  --name "overthinkers-morning-check" \
-  --schedule "0 8 * * *" \
-  --command "python3 $HOME/overthinkers/scripts/orchestrator.py"
+python3 -B -m unittest discover -s tests -v
+python3 scripts/validate-skills.py .
+./scripts/leak-scan.sh .
+git diff --check
 ```
 
-Verify your active schedules:
-
-```bash
-hermes cron list
-```
+A live Telegram smoke test and Hermes profile discovery must still be checked on your configured cloud runtime.

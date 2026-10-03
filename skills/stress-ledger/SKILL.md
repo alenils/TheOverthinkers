@@ -10,16 +10,16 @@ metadata:
     config:
       - key: health.health_db
         description: "Path to SQLite health metrics database"
-        default: "~/health/health.db"
+        default: "~/.hermes/data/health.db"
       - key: health.garmin_db
         description: "Path to Garmin SQLite database"
-        default: "~/health/garmin.db"
+        default: "~/.hermes/data/garmin.db"
       - key: stress.ledger_db
         description: "SQLite database for stress outcome ledger"
-        default: "data/ledger.db"
+        default: "~/.hermes/data/ledger.db"
       - key: stress.memory_path
-        description: "Path to persistent Profile/MEMORY.md document"
-        default: "Profile/MEMORY.md"
+        description: "Path to persistent runtime memories/MEMORY.md document"
+        default: "~/.hermes/memories/MEMORY.md"
     tags: [ledger, verification, closed-loop, memory, reflection]
 ---
 
@@ -50,7 +50,7 @@ Closes the empirical loop by recording stress check-in actions, evaluating subse
    ```
 
 4. **Reflect & Adapt Personal Memory (`stress.memory_path`):**
-   Writes verified habit efficacy into persistent memory under strict context rent:
+   Writes tentative follow-up associations into persistent memory under strict context rent:
    ```bash
    python3 ${HERMES_SKILL_DIR}/scripts/ledger.py reflect --db ${stress.ledger_db} --memory-path ${stress.memory_path}
    ```
@@ -59,3 +59,5 @@ Closes the empirical loop by recording stress check-in actions, evaluating subse
    ```bash
    python3 ${HERMES_SKILL_DIR}/scripts/ledger.py recap --db ${stress.ledger_db}
    ```
+
+Runtime defaults follow `HERMES_HOME` (fallback `~/.hermes`). Override configured paths together when using a custom home. Summaries retain source, uncertainty, and proposed/accepted/completed action status. Only completed, real, source-matched records with verified context enter action summaries, grouped by source and metric; at least five observations are required. Biometric follow-ups are observations, not evidence of efficacy.

@@ -1,105 +1,173 @@
 #!/usr/bin/env python3
-"""Hermes Messaging Gateway & Channel Dispatcher for The Overthinkers.
+"""Durable Telegram delivery and explicit local mock transport.
 
-Provides:
-  - Multi-channel dispatch (Hermes CLI, local messaging event queue, mock simulation)
-  - Correlation tracking via session_id and event_id
-  - Missing-reply TTL expiration
-  - File-based concurrency locking to make check-then-dispatch atomic
-  - Explicit labeling of simulated vs live biometric alerts
+Journal sends before HTTP; unknown delivery is never retried automatically.
+Run only one poller per bot (Telegram getUpdates contract).
 """
-
 from __future__ import annotations
-
-from datetime import datetime, timedelta, timezone
-import fcntl
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import time
-from typing import Any, Callable, Dict, Optional
+import re
+from urllib.request import Request, urlopen
 import uuid
+from runtime_config import runtime_home
 
-DEFAULT_TTL_SECONDS = 3600  # 1 hour reply timeout
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+DEFAULT_TTL_SECONDS = 3600
 
 
 class ConcurrencyLock:
-    """Inter-process file lock ensuring atomic check-then-dispatch."""
-
     def __init__(self, lock_path: Path):
         self.lock_path = lock_path
-        self._fd: Optional[int] = None
+        self._fd = None
 
-    def __enter__(self) -> ConcurrencyLock:
+    def __enter__(self):
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        if os.name == "nt":
+            if os.fstat(self._fd).st_size == 0:
+                os.write(self._fd, b"0")
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            msvcrt.locking(self._fd, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(self, *args):
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                if os.name == "nt":
+                    os.lseek(self._fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
                 os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
+                self._fd = None
+
+
+def save_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    tmp.replace(path)
+
+
+class TelegramTransport:
+    """Private-chat transport; secrets and recipient IDs come from environment."""
+    def __init__(self, token: str, chat_id: str, user_id: str, opener=urlopen):
+        if not token or not chat_id or not user_id:
+            raise ValueError("Set TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and TELEGRAM_USER_ID")
+        self._token, self.chat_id, self.user_id = token, str(chat_id), str(user_id)
+        self._opener = opener
+
+    @classmethod
+    def from_env(cls):
+        return cls(*(os.environ.get(key, "") for key in
+                     ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_USER_ID")))
+
+    def request(self, method: str, payload: dict):
+        req = Request(f"https://api.telegram.org/bot{self._token}/{method}",
+                      data=json.dumps(payload).encode(),
+                      headers={"Content-Type": "application/json"})
+        try:
+            with self._opener(req, timeout=35) as response:
+                result = json.load(response)
+            if not result.get("ok"):
+                raise RuntimeError("Telegram rejected the request")
+            return result["result"]
+        except Exception:
+            raise RuntimeError("Telegram request failed; inspect private runtime delivery state") from None
+
+    def send(self, text: str) -> int:
+        return self.request("sendMessage", {
+            "chat_id": self.chat_id, "text": text,
+            "reply_markup": {"force_reply": True, "selective": True},
+        })["message_id"]
+
+    def updates(self, offset: int):
+        return self.request("getUpdates", {"offset": offset, "timeout": 20,
+                                           "allowed_updates": ["message"]})
+
+
+class WhatsAppTransport:
+    """WhatsApp transport dispatching via Hermes send CLI."""
+    def __init__(self, recipient: Optional[str] = None):
+        self.recipient = recipient or os.environ.get("USER_WHATSAPP_PHONE")
+        self.chat_id = self.recipient
+        self.user_id = self.recipient
+
+    @classmethod
+    def from_env(cls):
+        return cls(os.environ.get("USER_WHATSAPP_PHONE"))
+
+    def send(self, text: str) -> int:
+        if not self.recipient:
+            raise ValueError("Set USER_WHATSAPP_PHONE")
+        import subprocess
+        cmd = ["hermes", "send", "--to", f"whatsapp:{self.recipient}", text]
+        res = subprocess.run(
+            ["hermes", "send", "--to", f"whatsapp:{self.recipient}", text],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if res.returncode != 0:
+            return 0
+        return 1
 
 
 class MessageEvent:
-    """Represents a discrete outbound or inbound conversational event."""
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
 
-    def __init__(
-        self,
-        event_id: str,
-        session_id: str,
-        direction: str,  # "OUTBOUND" or "INBOUND"
-        text: str,
-        channel: str,
-        timestamp: str,
-        correlation_id: Optional[str] = None,
-        is_simulated: bool = False,
-    ):
-        self.event_id = event_id
-        self.session_id = session_id
-        self.direction = direction
-        self.text = text
-        self.channel = channel
-        self.timestamp = timestamp
-        self.correlation_id = correlation_id
-        self.is_simulated = is_simulated
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "event_id": self.event_id,
-            "session_id": self.session_id,
-            "direction": self.direction,
-            "text": self.text,
-            "channel": self.channel,
-            "timestamp": self.timestamp,
-            "correlation_id": self.correlation_id,
-            "is_simulated": self.is_simulated,
-        }
+    def to_dict(self):
+        return dict(self.__dict__)
 
 
 class ChannelDispatcher:
-    """Dispatches outbound check-ins and correlates asynchronous replies."""
-
     def __init__(
         self,
-        channel: str = "hermes_cli",
-        spool_dir: Optional[Path] = None,
+        channel: str = "mock",
+        spool_dir: Optional[Path | str] = None,
         reply_ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        transport: Any = None,
         recipient: Optional[str] = None,
     ):
-        self.channel = channel
-        self.spool_dir = spool_dir or Path(".runtime/messaging_spool")
+        if channel not in ("mock", "hermes_cli", "telegram", "whatsapp"):
+            raise ValueError("Supported channels: mock, telegram, whatsapp")
+        self.channel = "mock" if channel == "hermes_cli" else (channel or "mock")
+        self.recipient = recipient or os.environ.get("USER_WHATSAPP_PHONE")
+        self.transport = transport
+        if self.channel == "telegram" and transport is None:
+            self.transport = TelegramTransport.from_env()
+        elif self.channel == "whatsapp" and transport is None:
+            self.transport = WhatsAppTransport(self.recipient)
+        self.spool_dir = Path(spool_dir) if spool_dir else runtime_home() / "state" / "messaging"
         self.spool_dir.mkdir(parents=True, exist_ok=True)
         self.reply_ttl_seconds = reply_ttl_seconds
-        self.recipient = recipient or os.environ.get("USER_WHATSAPP_PHONE")
 
-    def format_outbound_text(self, text: str, is_simulated: bool = False) -> str:
-        """Label simulated alerts clearly so users distinguish tests from live biometrics."""
+    def session_file(self, session_id):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+            raise ValueError("Invalid session ID")
+        return self.spool_dir / f"session_{session_id}.json"
+
+    def load(self, session_id):
+        return json.loads(self.session_file(session_id).read_text(encoding="utf-8"))
+
+    def save(self, data):
+        save_json(self.session_file(data["session_id"]), data)
+
+    def format_outbound_text(self, text, is_simulated=False):
         if is_simulated and not text.startswith("[Simulated Alert]"):
             return f"[Simulated Alert] {text}"
         return text
@@ -109,100 +177,118 @@ class ChannelDispatcher:
         text: str,
         session_id: Optional[str] = None,
         is_simulated: bool = False,
+        event_id: Optional[str] = None,
+        context: Optional[dict] = None,
     ) -> MessageEvent:
-        """Dispatch outbound message to channel and register pending event."""
-        s_id = session_id or str(uuid.uuid4())
-        e_id = f"evt_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        formatted_text = self.format_outbound_text(text, is_simulated=is_simulated)
-        event = MessageEvent(
-            event_id=e_id,
-            session_id=s_id,
-            direction="OUTBOUND",
-            text=formatted_text,
-            channel=self.channel,
-            timestamp=now_iso,
-            is_simulated=is_simulated,
-        )
-
-        # Spool outbound message
-        session_file = self.spool_dir / f"session_{s_id}.json"
-        session_data: Dict[str, Any] = {
-            "session_id": s_id,
-            "status": "AWAITING_REPLY",
-            "created_at": now_iso,
-            "ttl_seconds": self.reply_ttl_seconds,
-            "events": [event.to_dict()],
-        }
-
-        tmp_file = session_file.with_suffix(".tmp")
-        tmp_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
-        tmp_file.replace(session_file)
-
-        # Dispatch live message over WhatsApp if channel is configured
-        if self.channel == "whatsapp" and self.recipient:
-            import subprocess
+        session_id = session_id or str(uuid.uuid4())
+        event_id = event_id or f"evt_{uuid.uuid4().hex}"
+        with ConcurrencyLock(self.spool_dir / ".delivery.lock"):
+            path = self.session_file(session_id)
+            data = self.load(session_id) if path.exists() else {
+                "session_id": session_id,
+                "events": [],
+                "context": context or {},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "ttl_seconds": self.reply_ttl_seconds,
+                "status": "AWAITING_REPLY",
+                "chat_id": getattr(self.transport, "chat_id", None) or self.recipient,
+                "user_id": getattr(self.transport, "user_id", None) or self.recipient,
+            }
+            for previous in data["events"]:
+                if previous["event_id"] == event_id:
+                    return MessageEvent(**previous)
+            event = MessageEvent(
+                event_id=event_id,
+                session_id=session_id,
+                direction="OUTBOUND",
+                text=self.format_outbound_text(text, is_simulated),
+                channel=self.channel,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                correlation_id=None,
+                is_simulated=is_simulated,
+                delivery_status="SENDING",
+                message_id=None,
+            )
+            data["events"].append(event.to_dict())
+            data["status"] = "SENDING"
+            self.save(data)
             try:
-                subprocess.run(
-                    ["hermes", "send", "--to", f"whatsapp:{self.recipient}", formatted_text],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
+                event.message_id = self.transport.send(event.text) if self.transport else None
+                event.delivery_status = "DELIVERED" if self.transport else "MOCK_RECORDED"
+                data["status"] = "AWAITING_REPLY"
+                data["awaiting_since"] = event.timestamp
             except Exception:
-                pass
+                event.delivery_status = "DELIVERY_UNCERTAIN"
+                data["status"] = "DELIVERY_UNCERTAIN"
+                data["events"][-1] = event.to_dict()
+                self.save(data)
+                raise
+            data["events"][-1] = event.to_dict()
+            self.save(data)
+            return event
 
-        return event
+    def record_reply(self, session_id, reply_text, event_id=None):
+        with ConcurrencyLock(self.spool_dir / ".delivery.lock"):
+            if not reply_text.strip():
+                raise ValueError("An empty input is not a reply")
+            data = self.load(session_id)
+            event_id = event_id or f"evt_{uuid.uuid4().hex}"
+            if any(e["event_id"] == event_id for e in data["events"]):
+                return None
+            status = self._check_session_status(session_id)
+            if status == "EXPIRED_NO_REPLY":
+                raise TimeoutError("Session reply deadline elapsed")
+            if status not in ("AWAITING_REPLY", "AWAITING_CONFIRMATION"):
+                raise ValueError("Session is not awaiting a reply")
+            outbound = next(e for e in reversed(data["events"]) if e["direction"] == "OUTBOUND")
+            event = MessageEvent(
+                event_id=event_id,
+                session_id=session_id,
+                direction="INBOUND",
+                text=reply_text,
+                channel=self.channel,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                correlation_id=outbound["event_id"],
+                is_simulated=outbound["is_simulated"],
+            )
+            data["events"].append(event.to_dict())
+            data["status"] = "REPLY_RECEIVED"
+            self.save(data)
+            return event
 
-    def record_reply(self, session_id: str, reply_text: str) -> MessageEvent:
-        """Correlate inbound reply to existing active session."""
-        session_file = self.spool_dir / f"session_{session_id}.json"
-        if not session_file.is_file():
-            raise FileNotFoundError(f"Session not found: {session_id}")
+    def check_session_status(self, session_id):
+        with ConcurrencyLock(self.spool_dir / ".delivery.lock"):
+            return self._check_session_status(session_id)
 
-        session_data = json.loads(session_file.read_text(encoding="utf-8"))
-        created_dt = datetime.fromisoformat(session_data["created_at"])
-        elapsed = (datetime.now(timezone.utc) - created_dt).total_seconds()
-
-        if elapsed > session_data.get("ttl_seconds", self.reply_ttl_seconds):
-            session_data["status"] = "EXPIRED_NO_REPLY"
-            session_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
-            raise TimeoutError(f"Session {session_id} has expired (elapsed {elapsed:.0f}s > TTL)")
-
-        e_id = f"evt_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(timezone.utc).isoformat()
-        reply_event = MessageEvent(
-            event_id=e_id,
-            session_id=session_id,
-            direction="INBOUND",
-            text=reply_text,
-            channel=self.channel,
-            timestamp=now_iso,
-            correlation_id=session_data["events"][-1]["event_id"],
-        )
-
-        session_data["events"].append(reply_event.to_dict())
-        session_data["status"] = "REPLY_RECEIVED"
-
-        tmp_file = session_file.with_suffix(".tmp")
-        tmp_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
-        tmp_file.replace(session_file)
-
-        return reply_event
-
-    def check_session_status(self, session_id: str) -> str:
-        """Check status and apply TTL expiration if overdue."""
-        session_file = self.spool_dir / f"session_{session_id}.json"
-        if not session_file.is_file():
+    def _check_session_status(self, session_id):
+        if not self.session_file(session_id).is_file():
             return "NOT_FOUND"
+        data = self.load(session_id)
+        if data["status"] == "SENDING":
+            data["status"] = "DELIVERY_UNCERTAIN"
+            self.save(data)
+        if data["status"] in ("AWAITING_REPLY", "AWAITING_CONFIRMATION"):
+            since = datetime.fromisoformat(data.get("awaiting_since", data["created_at"]))
+            if (datetime.now(timezone.utc) - since).total_seconds() > data["ttl_seconds"]:
+                data["status"] = "EXPIRED_NO_REPLY"
+                self.save(data)
+        return data["status"]
 
-        session_data = json.loads(session_file.read_text(encoding="utf-8"))
-        if session_data["status"] == "AWAITING_REPLY":
-            created_dt = datetime.fromisoformat(session_data["created_at"])
-            elapsed = (datetime.now(timezone.utc) - created_dt).total_seconds()
-            if elapsed > session_data.get("ttl_seconds", self.reply_ttl_seconds):
-                session_data["status"] = "EXPIRED_NO_REPLY"
-                session_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
-
-        return session_data["status"]
+    def correlate_update(self, update):
+        msg = update.get("message", {})
+        if (str(msg.get("chat", {}).get("id")) != self.transport.chat_id
+                or str(msg.get("from", {}).get("id")) != self.transport.user_id
+                or msg.get("chat", {}).get("type") != "private"
+                or not msg.get("text", "").strip()):
+            return None
+        reply_to = msg.get("reply_to_message", {}).get("message_id")
+        for path in self.spool_dir.glob("session_*.json"):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data["chat_id"] != self.transport.chat_id or data["user_id"] != self.transport.user_id:
+                continue
+            status = self.check_session_status(data["session_id"])
+            outbound = next((e for e in reversed(data["events"]) if e["direction"] == "OUTBOUND"), {})
+            if (reply_to is not None and outbound.get("message_id") == reply_to
+                    and status in ("AWAITING_REPLY", "AWAITING_CONFIRMATION", "REPLY_RECEIVED")):
+                return data["session_id"], msg["text"], f"telegram_{update['update_id']}"
+        return None

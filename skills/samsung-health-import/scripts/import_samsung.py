@@ -188,13 +188,14 @@ def import_archive_to_db(zip_path: Path, db_path: Path) -> int:
 
 
 def main() -> int:
+    home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     parser = argparse.ArgumentParser(description="Import Samsung Health export archives into SQLite.")
     parser.add_argument("--zip-path", help="Path to Samsung Health export zip")
     parser.add_argument("--dir", help="Directory containing Samsung export archives")
-    parser.add_argument("--db-path", default="data/health.db", help="Path to SQLite health database")
+    parser.add_argument("--db-path", default=str(home / "data" / "health.db"), help="Path to SQLite health database")
 
     args = parser.parse_args()
-    db_path = Path(args.db_path)
+    db_path = Path(args.db_path).expanduser()
 
     if args.zip_path:
         zip_p = Path(args.zip_path)

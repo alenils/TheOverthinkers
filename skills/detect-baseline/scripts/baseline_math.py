@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import os
 import math
 from pathlib import Path
 import re
@@ -90,6 +91,7 @@ def evaluate_workout_confounder(
     historical_strains: List[float],
     absolute_threshold: float = 14.0,
     strain_sigma_threshold: float = 1.5,
+    min_history_days: int = 14,
 ) -> Tuple[str, str]:
     """Determine whether prior day's workout strain explains the physiological dip.
 
@@ -108,6 +110,9 @@ def evaluate_workout_confounder(
             "CONFOUNDED_STRAIN",
             f"Absolute workout strain score {prior_strain:.1f} >= threshold {absolute_threshold:.1f}",
         )
+
+    if len(historical_strains) < min_history_days:
+        return "WORKOUT_HISTORY_UNVERIFIED", "Insufficient same-source workout history; cause remains uncertain."
 
     if historical_strains:
         mean_strain, std_strain = compute_mean_and_std(historical_strains)
@@ -176,8 +181,10 @@ def load_unified_series(
                 "workout_strain_score": None,
                 "sources": [],
                 "metric_sources": {},
+                "source_records": {},
             })
             src = r["source"] or "wearable"
+            cur["source_records"][src] = dict(r)
             if src not in cur["sources"]:
                 cur["sources"].append(src)
 
@@ -204,11 +211,27 @@ def load_unified_series(
     return target_rec, prior_rec, history_recs
 
 
+def metric_source(record: Dict[str, Any], metric: str) -> Optional[str]:
+    return record.get("metric_sources", {}).get(metric) or record.get("source")
+
+
+def source_value(record: Optional[Dict[str, Any]], metric: str, source: Optional[str]):
+    """Select one provider's measurement even when a merged row prefers another."""
+    if not record:
+        return None
+    selected = record.get("source_records", {}).get(source)
+    value = selected.get(metric) if selected is not None else (
+        record.get(metric) if metric_source(record, metric) == source else None)
+    if value is None or not math.isfinite(float(value)):
+        return None
+    return float(value)
+
+
 def check_quiet_hours(dt: datetime, quiet_hours: str = "08:00-21:00") -> bool:
     """Return True if dt time is within the allowed proactive ping window."""
     m = re.match(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})$", quiet_hours.strip())
     if not m:
-        return True
+        raise ValueError("Allowed hours must use HH:MM-HH:MM")
     start_h, start_m, end_h, end_m = map(int, m.groups())
     t = dt.time()
     start_time = datetime.min.time().replace(hour=start_h, minute=start_m)
@@ -230,12 +253,12 @@ def evaluate_day_metrics(
     target_date = target_rec["date"]
 
     # Filter history records having valid autonomic values
-    valid_hrv_history = [
-        float(r["hrv_score"]) for r in history_recs if r.get("hrv_score") is not None
-    ]
-    valid_frag_history = [
-        float(r["sleep_fragmentation"]) for r in history_recs if r.get("sleep_fragmentation") is not None
-    ]
+    hrv_source = metric_source(target_rec, "hrv_score")
+    frag_source = metric_source(target_rec, "sleep_fragmentation")
+    valid_hrv_history = [v for r in history_recs
+                         if (v := source_value(r, "hrv_score", hrv_source)) is not None]
+    valid_frag_history = [v for r in history_recs
+                          if (v := source_value(r, "sleep_fragmentation", frag_source)) is not None]
 
     if len(valid_hrv_history) < min_history_days and len(valid_frag_history) < min_history_days:
         return {
@@ -258,14 +281,12 @@ def evaluate_day_metrics(
 
     # Background training strain history strictly precedes prior day (no self-normalization)
     prior_date_str = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-    background_strain_history = [
-        float(r["workout_strain_score"])
-        for r in history_recs
-        if r.get("workout_strain_score") is not None and r["date"] < prior_date_str
-    ]
+    strain_source = metric_source(prior_rec or {}, "workout_strain_score")
+    background_strain_history = [v for r in history_recs if r["date"] < prior_date_str
+                                and (v := source_value(r, "workout_strain_score", strain_source)) is not None]
 
-    current_hrv = target_rec.get("hrv_score")
-    current_frag = target_rec.get("sleep_fragmentation")
+    current_hrv = source_value(target_rec, "hrv_score", hrv_source)
+    current_frag = source_value(target_rec, "sleep_fragmentation", frag_source)
 
     # Safely extract prior day strain without crashing on None
     prior_strain: Optional[float] = None
@@ -273,8 +294,18 @@ def evaluate_day_metrics(
         prior_strain = float(prior_rec["workout_strain_score"])
 
     # Extract prior day hrv/frag for slope delta calculation
-    prior_hrv = float(prior_rec["hrv_score"]) if (prior_rec and prior_rec.get("hrv_score") is not None) else None
-    prior_frag = float(prior_rec["sleep_fragmentation"]) if (prior_rec and prior_rec.get("sleep_fragmentation") is not None) else None
+    prior_hrv = source_value(prior_rec, "hrv_score", hrv_source)
+    prior_frag = source_value(prior_rec, "sleep_fragmentation", frag_source)
+    # The level detector supports gapped histories; daily-delta detection requires
+    # consecutive readings from the same provider, rather than compressed gaps.
+    def consecutive(metric, source):
+        dates = [datetime.strptime(r["date"], "%Y-%m-%d") for r in history_recs
+                 if source_value(r, metric, source) is not None]
+        return all((b - a).days == 1 for a, b in zip(dates, dates[1:]))
+    if not consecutive("hrv_score", hrv_source):
+        prior_hrv = None
+    if not consecutive("sleep_fragmentation", frag_source):
+        prior_frag = None
 
     hrv_break = False
     hrv_z, hrv_mean, hrv_std, hrv_slope_z = 0.0, 0.0, 0.0, None
@@ -293,10 +324,17 @@ def evaluate_day_metrics(
     is_anomaly = hrv_break or frag_break
     triggered_metric = "hrv_score" if hrv_break else ("sleep_fragmentation" if frag_break else "none")
     deviation_val = hrv_z if hrv_break else (frag_z if frag_break else 0.0)
+    provenance = {
+        "metric_sources": target_rec.get("metric_sources", {}),
+        "baseline_mean": hrv_mean if hrv_break else frag_mean,
+        "baseline_std": hrv_std if hrv_break else frag_std,
+        "baseline_samples": len(valid_hrv_history) if hrv_break else len(valid_frag_history),
+        "uncertainty_flags": [],
+    }
 
     # Confounder check
     confounder_status, confounder_reason = evaluate_workout_confounder(
-        prior_strain, background_strain_history, workout_strain_threshold, anomaly_sigma
+        prior_strain, background_strain_history, workout_strain_threshold, anomaly_sigma, min_history_days
     )
 
     if not is_anomaly:
@@ -319,24 +357,28 @@ def evaluate_day_metrics(
             "prior_workout_strain": prior_strain,
             "confounder_status": confounder_status,
             "confounder_reason": confounder_reason,
-            "message": f"Autonomic dip on {triggered_metric} explained by athletic load. Suppressed mental stress check-in. Silence.",
+            "message": f"Athletic load is a possible contributing factor for {triggered_metric}. Silence.",
+            **provenance,
         }
 
-    if confounder_status == "WORKOUT_DATA_MISSING_UNVERIFIED":
-        # Dispatches with unverified confounder warning so downstream coach and ledger are aware
+    if confounder_status.endswith("UNVERIFIED"):
+        # Unknown workout context stays silent proactively; retain it for a
+        # user-initiated or explicitly simulated dialogue and its outcome ledger.
+        provenance["uncertainty_flags"] = [confounder_status]
         return {
             "date": target_date,
             "status": "AUTONOMIC_ANOMALY",
-            "dispatch_trigger": True,
+            "dispatch_trigger": False,
             "triggered_metric": triggered_metric,
             "deviation_sigma": round(deviation_val, 2),
             "hrv": {"value": current_hrv, "mean": round(hrv_mean, 2), "z_score": round(hrv_z, 2)},
             "sleep_fragmentation": {"value": current_frag, "mean": round(frag_mean, 2), "z_score": round(frag_z, 2)},
-            "prior_workout_strain": None,
-            "confounder_status": "WORKOUT_DATA_MISSING_UNVERIFIED",
+            "prior_workout_strain": prior_strain,
+            "confounder_status": confounder_status,
             "confounder_reason": confounder_reason,
             "metric_sources": target_rec.get("metric_sources", {}),
-            "message": f"Slope break confirmed on {triggered_metric} (z={deviation_val:.2f}), but prior workout records are missing.",
+            "message": f"Wearable anomaly on {triggered_metric}; workout context is unknown. Silence.",
+            **provenance,
         }
 
     # Authentic unconfounded psychological / autonomic anomaly
@@ -352,18 +394,20 @@ def evaluate_day_metrics(
         "confounder_status": "NO_CONFOUNDER_DETECTED",
         "confounder_reason": confounder_reason,
         "metric_sources": target_rec.get("metric_sources", {}),
-        "message": f"Slope break confirmed on {triggered_metric} (z={deviation_val:.2f}). Ready for cognitive appraisal.",
+        "message": f"Wearable anomaly on {triggered_metric}; cause remains unverified.",
+        **provenance,
     }
 
 
 def main() -> int:
+    home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     parser = argparse.ArgumentParser(description="Evaluate rolling baseline and workout confounders.")
     subparsers = parser.add_subparsers(dest="command")
 
     check_p = subparsers.add_parser("check", help="Check baseline for a given date in DB")
     check_p.add_argument("--date", required=True, help="Target date YYYY-MM-DD")
-    check_p.add_argument("--db-path", default="data/health.db", help="Path to primary SQLite metrics database")
-    check_p.add_argument("--garmin-db", default="data/garmin.db", help="Path to secondary Garmin SQLite database")
+    check_p.add_argument("--db-path", default=str(home / "data" / "health.db"), help="Path to primary SQLite metrics database")
+    check_p.add_argument("--garmin-db", default=str(home / "data" / "garmin.db"), help="Path to secondary Garmin SQLite database")
     check_p.add_argument("--window-days", type=int, default=28, help="Rolling window size in days")
     check_p.add_argument("--min-history-days", type=int, default=14, help="Minimum history days required")
     check_p.add_argument("--anomaly-sigma", type=float, default=1.5, help="Anomaly sigma threshold")
@@ -372,9 +416,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "check":
-        db_paths = [Path(args.db_path)]
+        db_paths = [Path(args.db_path).expanduser()]
         if args.garmin_db:
-            g_path = Path(args.garmin_db)
+            g_path = Path(args.garmin_db).expanduser()
             if g_path.is_file() and g_path not in db_paths:
                 db_paths.append(g_path)
 

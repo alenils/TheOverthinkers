@@ -74,14 +74,14 @@ def detect_rumination(text: str) -> bool:
 
 def detect_action_acceptance(user_text: str) -> Optional[bool]:
     """Detect whether user accepted, rejected, or did not report on micro-action."""
-    lower = user_text.lower().strip()
-    accept_markers = ["ok", "will do", "sounds good", "yes", "i'll do that", "got it", "sure", "done", "agree", "trying it"]
-    reject_markers = ["no", "can't do that", "won't work", "useless", "impossible", "not doing that"]
-
-    if any(m in lower for m in accept_markers):
-        return True
-    if any(m in lower for m in reject_markers):
+    lower = user_text.lower().strip().replace("’", "'")
+    if re.search(r"\b(not sure|unsure|maybe|yesterday|not done|haven't|have not)\b", lower):
+        return None
+    if re.search(r"\b(no|won't|will not|can't|cannot|not doing|decline)\b", lower):
         return False
+    if re.fullmatch(r"(?:yes|ok(?:ay)?|sure|sounds good|will do|i'll do (?:that|it)|"
+                    r"i will do (?:that|it)|done|i (?:did|completed) (?:it|that))[.! ]*", lower):
+        return True
     return None
 
 
@@ -96,7 +96,7 @@ def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
     # 1. Low Perceived Control / Threat Markers
     # Must precede Eustress: e.g. "My deadline is impossible and I have no control" is strictly DISTRESS!
     low_control_markers = [
-        "no control", "out of my control", "out of control", "zero control",
+        "no control", "not in control", "out of my control", "out of control", "zero control",
         "impossible", "can't handle", "cannot handle", "uncontrollable",
         "overwhelmed", "helpless", "trapped", "powerless", "drowning",
     ]
@@ -127,12 +127,9 @@ def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
         )
 
     # 3. Eustress (High control / challenge orientation / proactive load)
-    eustress_markers = [
-        "launch", "release", "shipping", "excited", "code", "deadline",
-        "project", "presentation", "interview", "workload", "milestone",
-    ]
-    high_control_phrases = ["working on", "finishing", "preparing", "building", "executing", "delivering"]
-    if any(k in lower for k in eustress_markers) or any(p in lower for p in high_control_phrases):
+    high_control_phrases = ["in control", "manageable", "i can handle", "i have a plan", "excited", "positive challenge"]
+    if (any(p in lower for p in high_control_phrases)
+            and not any(p in lower for p in ("not sure", "don't know", "dont know", "not excited", "not manageable"))):
         return (
             "EUSTRESS",
             "CHALLENGE_LOAD",
@@ -152,10 +149,10 @@ def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
 
     # Fallback for general negative or unclassified tension
     return (
-        "DISTRESS",
-        "UNSPECIFIED_TENSION",
-        "OUTDOOR_WALK",
-        "Possible explanation: unspecified acute tension",
+        "UNCERTAIN",
+        "AMBIGUOUS_FRICTION",
+        "GROUNDING_PAUSE",
+        "Possible explanation: context remains uncertain",
     )
 
 
@@ -170,7 +167,7 @@ class DialogueSession:
         if max_turns < 2:
             max_turns = 2
         self.anomaly = anomaly_payload
-        self.max_turns = max_turns
+        self.max_turns = min(max_turns, 3)
         self.transcript: List[Dict[str, Any]] = []
         self.turn_count = 0
         self.clarification_asked = False
@@ -182,11 +179,19 @@ class DialogueSession:
         self.prescribed_action: Optional[str] = None
         self.subjective_rating: Optional[int] = None
         self.action_accepted: Optional[bool] = None
+        self.action_completed: Optional[bool] = None
+        self.confirmation_received = False
 
     def start(self) -> str:
         """Turn 1 (Coach): Dispatch opening observer check-in."""
         self.turn_count = 1
         msg = OPENING_CHECKIN
+        if self.anomaly.get("uncertainty_flags"):
+            msg = ("A wearable change was flagged, but its cause remains uncertain; "
+                   "workout or measurement context may be incomplete. "
+                   "Looking at your day from the outside, what's taking up your bandwidth?")
+        if self.anomaly.get("is_simulated", False):
+            msg = "[Simulated Alert] " + msg
         self.transcript.append({
             "turn": self.turn_count,
             "speaker": "coach",
@@ -203,10 +208,8 @@ class DialogueSession:
         if subjective_rating is not None:
             self.subjective_rating = max(1, min(10, subjective_rating))
 
-        # Check action acceptance
-        acc = detect_action_acceptance(user_text)
-        if acc is not None:
-            self.action_accepted = acc
+        if not user_text.strip():
+            return ""
 
         self.transcript.append({
             "turn": self.turn_count,
@@ -247,7 +250,7 @@ class DialogueSession:
             self.clarification_asked = True
             clarifying_msg = (
                 "Looking at today from an external viewpoint: is the main friction coming from "
-                "an operational workload, an interpersonal conflict, or physical tiredness?"
+                "physical tiredness, a threat, or a challenge you feel able to handle?"
             )
             self.transcript.append({
                 "turn": self.turn_count,
@@ -268,8 +271,8 @@ class DialogueSession:
 
         closing_msg = (
             f"Understood. Stepping back to observe the pattern: {self.attributed_cause.lower()}. "
-            f"Prescribed micro-action: {self.prescribed_action} "
-            f"Check-in complete. Monitoring tomorrow's recovery."
+            f"Optional micro-action: {self.prescribed_action} Would you like to try it? "
+            "Tomorrow's readings are observations, not proof of benefit."
         )
         self.transcript.append({
             "turn": self.turn_count,
@@ -278,6 +281,20 @@ class DialogueSession:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         return closing_msg
+
+    def confirm_action(self, user_text: str) -> None:
+        """Record a post-proposal reply without adding another coach message."""
+        if not self.prescribed_action or self.confirmation_received:
+            return
+        self.confirmation_received = True
+        self.action_accepted = detect_action_acceptance(user_text)
+        lower = user_text.strip().lower().replace("’", "'")
+        if self.action_accepted is True and re.fullmatch(r"(?:done|i (?:did|completed) (?:it|that))[.! ]*", lower):
+            self.action_completed = True
+        elif re.fullmatch(r"(?:not done|haven't done it|have not done it)[.! ]*", lower):
+            self.action_completed = False
+        self.transcript.append({"turn": self.turn_count, "speaker": "user", "message": user_text,
+                                "timestamp": datetime.now(timezone.utc).isoformat()})
 
     def get_summary(self) -> Dict[str, Any]:
         """Return structured session summary suitable for Gate 3 ledger."""
@@ -294,6 +311,14 @@ class DialogueSession:
             "intervention_type": self.prescribed_action,
             "subjective_rating": self.subjective_rating,
             "action_accepted": self.action_accepted,
+            "action_completed": self.action_completed,
+            "confirmation_received": self.confirmation_received,
+            "uncertainty_flags": list(dict.fromkeys(self.anomaly.get("uncertainty_flags", [])
+                                      + (["APPRAISAL_UNCERTAIN"] if self.appraisal_category == "UNCERTAIN" else []))),
+            "confounder_status": self.anomaly.get("confounder_status", "UNVERIFIED"),
+            "metric_source": self.anomaly.get("metric_sources", {}).get(metric_key),
+            "baseline_mean": self.anomaly.get("baseline_mean"),
+            "baseline_std": self.anomaly.get("baseline_std"),
             "turn_count": self.turn_count,
             "max_turns": self.max_turns,
             "transcript": self.transcript,
@@ -320,19 +345,31 @@ def run_dialogue(
             try:
                 user_msg = input(f"[User Turn {session.turn_count}]: ").strip()
             except (EOFError, KeyboardInterrupt):
-                user_msg = "Exhausted"
+                break
         else:
             if mock_responses and resp_idx < len(mock_responses):
                 user_msg = mock_responses[resp_idx]
                 resp_idx += 1
             else:
-                user_msg = "Defaulting to workload release"
+                break
+
+        if not user_msg.strip():
+            break
 
         coach_reply = session.process_user_turn(user_msg, subjective_rating=subjective_rating)
         if interactive:
             print(f"[Coach Turn {session.turn_count}]: {coach_reply}")
 
         if session.status in ["COMPLETED", "CIRCUIT_BREAKER_TRIGGERED"]:
+            if mock_responses and resp_idx < len(mock_responses):
+                session.confirm_action(mock_responses[resp_idx])
+            elif interactive:
+                try:
+                    confirmation = input("[Action confirmation, optional]: ").strip()
+                    if confirmation:
+                        session.confirm_action(confirmation)
+                except (EOFError, KeyboardInterrupt):
+                    pass
             break
 
     return session.get_summary()

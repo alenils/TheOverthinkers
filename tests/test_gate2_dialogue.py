@@ -22,7 +22,7 @@ class TestGate2Dialogue(unittest.TestCase):
     def test_eustress_classification_and_action(self):
         summary = dialogue_engine.run_dialogue(
             anomaly_payload=self.anomaly_payload,
-            mock_responses=["We are launching the new product version today and shipping final code."],
+            mock_responses=["We are launching today; I am excited and have it in control."],
             subjective_rating=6,
         )
         self.assertEqual(summary["status"], "COMPLETED")
@@ -68,7 +68,7 @@ class TestGate2Dialogue(unittest.TestCase):
     def test_action_acceptance_detection(self):
         summary = dialogue_engine.run_dialogue(
             anomaly_payload=self.anomaly_payload,
-            mock_responses=["Sounds good, will do that right away."],
+            mock_responses=["I feel overwhelmed by this deadline.", "Will do."],
         )
         self.assertEqual(summary["action_accepted"], True)
 
@@ -95,7 +95,7 @@ class TestGate2Dialogue(unittest.TestCase):
         # User answers coach's offered option "workload"
         summary = dialogue_engine.run_dialogue(
             anomaly_payload=self.anomaly_payload,
-            mock_responses=["Not sure", "Heavy operational workload and code milestones"],
+            mock_responses=["Not sure", "Heavy workload, but manageable; I have a plan."],
         )
         self.assertEqual(summary["status"], "COMPLETED")
         self.assertEqual(summary["turn_count"], 3)

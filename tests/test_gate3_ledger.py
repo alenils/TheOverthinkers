@@ -166,6 +166,9 @@ class TestGate3Ledger(unittest.TestCase):
             deviation_sigma=2.0,
             cause_id="RECOVERY_DEFICIT",
             intervention_id="SCREEN_CURFEW",
+            metric_source="samsung",
+            baseline_mean=0.10,
+            baseline_std=0.02,
         )
 
         conn = import_samsung.init_db(self.health_db)
@@ -266,7 +269,7 @@ class TestGate3Ledger(unittest.TestCase):
             ledger_db=self.ledger_db,
             memory_path=self.memory_file,
             state_file=state_file,
-            mock_reply="Launching final code release today, huge milestone.",
+            mock_reply="Launching today; I am excited and have it in control.",
             ignore_quiet_hours=True,
             subjective_rating=8,
         )
@@ -300,12 +303,13 @@ class TestGate3Ledger(unittest.TestCase):
         inst_dir = Path(self.temp_dir) / "test_hermes_runtime"
         report = install_runtime.install_runtime(inst_dir)
         self.assertTrue((inst_dir / "skills").is_dir())
-        self.assertTrue((inst_dir / "Profile" / "SOUL.md").is_file())
+        self.assertTrue((inst_dir / "SOUL.md").is_file())
+        self.assertTrue((inst_dir / "memories" / "MEMORY.md").is_file())
         self.assertTrue((inst_dir / "data").is_dir())
         self.assertTrue((inst_dir / "state").is_dir())
 
         # Second install preserves personalized files
-        user_file = inst_dir / "Profile" / "USER.md"
+        user_file = inst_dir / "memories" / "USER.md"
         user_file.write_text("CUSTOM_USER_DATA", encoding="utf-8")
         report2 = install_runtime.install_runtime(inst_dir)
         self.assertIn("USER.md", report2["preserved_profiles"])

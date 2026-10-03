@@ -284,38 +284,17 @@ The Overthinkers repository ships with 6 core skills under `skills/`:
    '
    ```
 
-### B6 — configure Hermes & instantiate profiles
+### B6 — configure runtime paths and preserve profiles
 
-Configure skill storage paths, quiet hours, and bootstrap the 3-Tier Profile architecture:
+Use the shared installer; do not overwrite personalized profiles with `cp`:
 
-1. **Configure paths and quiet hours in Hermes**:
-   ```bash
-   matrix run --project=main -C . -- bash -lc '
-   hermes config set skills.config.health.health_dir ~/health
-   hermes config set skills.config.health.baseline_doc ~/health/baseline.md
-   hermes config set skills.config.stress.ledger_db ~/health/data/ledger.db
-   hermes config set skills.config.proactive.timezone <TIMEZONE>
-   hermes config set skills.config.proactive.quiet_hours "08:00-21:00"
-   mkdir -p ~/health/data ~/.hermes/memories
-   '
-   ```
+```bash
+python3 ~/overthinkers/scripts/install_runtime.py --dry-run
+python3 ~/overthinkers/scripts/install_runtime.py
+hermes skills list
+```
 
-   > **Note:** The warning `'skills.config....' is not a recognized config key` is normal (dynamic
-   > skill keys are not in the static schema, but the values are persisted to `~/.hermes/config.yaml`).
-
-2. **Bootstrap the 3-Tier Profile**:
-   ```bash
-   matrix run --project=main -C . -- bash -lc '
-   # Tier 1: Canonical AI Persona (The Self-Distanced Observer)
-   cp ~/overthinkers/Profile/SOUL.md ~/.hermes/SOUL.md
-
-   # Tier 2: Durable Human Context Scaffold
-   cp ~/overthinkers/Profile/USER.md ~/.hermes/memories/USER.md
-
-   # Tier 3: Living Memory & Efficacy Ledger
-   cp ~/overthinkers/Profile/MEMORY.md ~/.hermes/memories/MEMORY.md
-   '
-   ```
+Defaults use `HERMES_HOME` or `~/.hermes`, with data in `data/`, persona at `SOUL.md`, and context/memory in `memories/`. Set the same home and data paths for Hermes and all helper processes. Follow [ONBOARDING.md sections 5–8](../../ONBOARDING.md#5-install-profiles-and-use-one-runtime-home) for Telegram secrets, timezone, daily delivery, and the supervised reply worker. The current runner performs deterministic triage; a Hermes chat is a separate model session.
 
 ### B7 — create the Hermes Agent Desktop App & Icon (Matrix OS GUI)
 
@@ -410,24 +389,11 @@ The automated box setup is complete. The remaining steps are personal:
    - Cognitive appraisal triage (Distress vs. Eustress vs. Recovery Drain)
    - Bounded single micro-action commitment
    - Strict $\le 3$ turn ceiling and anti-rumination circuit breaker
-   - Automatic logging to the closed-loop outcome ledger in `~/health/data/ledger.db`
+   - Automatic logging to the closed-loop outcome ledger in `$HERMES_HOME/data/ledger.db`
 
-### B9 — schedule proactive daily morning check (Cron)
+### B9 — daily delivery and supervised replies
 
-Schedule the proactive baseline check so Hermes evaluates morning slope breaks at 08:00 daily (defaulting to silence unless an authentic anomaly crosses threshold):
-
-```bash
-matrix run --project=main -C . -- bash -lc '
-hermes cron add \
-  --name "overthinkers-morning-check" \
-  --schedule "0 8 * * *" \
-  --command "python3 $HOME/overthinkers/scripts/orchestrator.py"
-
-hermes cron list
-'
-```
-
----
+Schedule `python3 ~/overthinkers/scripts/orchestrator.py --channel telegram` once each local morning using the configured scheduler. Run `python3 ~/overthinkers/scripts/orchestrator.py --watch` under a process supervisor. Both processes must inherit the same `HERMES_HOME`, `STRESS_TIMEZONE`, and private Telegram environment variables. See [ONBOARDING.md](../../ONBOARDING.md#7-configure-telegram-delivery-and-replies) for the complete setup and live acceptance checks.
 
 ## Teardown
 

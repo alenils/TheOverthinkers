@@ -2,7 +2,7 @@
 """Closed-loop outcome ledger and personal adaptation engine.
 
 Tracks stress interventions, verifies next-day biometric recovery against
-the rolling baseline, and updates Profile/MEMORY.md under context rent rules.
+the rolling baseline, and updates runtime memories/MEMORY.md under context rent rules.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -51,6 +52,18 @@ def init_ledger_db(db_path: Path) -> sqlite3.Connection:
             )
             """
         )
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(stress_ledger)")}
+        # Additive migration preserves existing ledgers; old records remain unverified.
+        for name, kind in {
+            "session_id": "TEXT", "metric_source": "TEXT", "baseline_mean": "REAL",
+            "baseline_std": "REAL", "uncertainty_flags": "TEXT DEFAULT '[]'",
+            "confounder_status": "TEXT DEFAULT 'UNVERIFIED'",
+            "action_accepted": "INTEGER", "action_completed": "INTEGER",
+            "is_simulated": "INTEGER", "appraisal_category": "TEXT",
+        }.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE stress_ledger ADD COLUMN {name} {kind}")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ledger_session ON stress_ledger(session_id)")
     return conn
 
 
@@ -64,12 +77,30 @@ def add_ledger_entry(
     cause_id: Optional[str] = None,
     intervention_id: Optional[str] = None,
     subjective_rating: Optional[int] = None,
+    session_id: Optional[str] = None,
+    metric_source: Optional[str] = None,
+    baseline_mean: Optional[float] = None,
+    baseline_std: Optional[float] = None,
+    uncertainty_flags: Optional[List[str]] = None,
+    confounder_status: str = "UNVERIFIED",
+    action_accepted: Optional[bool] = None,
+    action_completed: Optional[bool] = None,
+    is_simulated: Optional[bool] = None,
+    appraisal_category: Optional[str] = None,
 ) -> int:
     """Record a new check-in entry into the ledger."""
     conn = init_ledger_db(db_path)
     now_iso = datetime.now(timezone.utc).isoformat()
     d = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    if session_id:
+        existing = conn.execute("SELECT id FROM stress_ledger WHERE session_id = ?", (session_id,)).fetchone()
+        if existing:
+            with conn:
+                conn.execute("UPDATE stress_ledger SET action_accepted = COALESCE(?, action_accepted), action_completed = COALESCE(?, action_completed) WHERE id = ?",
+                             (action_accepted, action_completed, existing[0]))
+            conn.close()
+            return existing[0]
     with conn:
         cur = conn.execute(
             """
@@ -92,6 +123,12 @@ def add_ledger_entry(
             ),
         )
         row_id = cur.lastrowid or 0
+        conn.execute("""UPDATE stress_ledger SET session_id=?, metric_source=?, baseline_mean=?,
+                     baseline_std=?, uncertainty_flags=?, confounder_status=?, action_accepted=?,
+                     action_completed=?, is_simulated=?, appraisal_category=? WHERE id=?""",
+                     (session_id, metric_source, baseline_mean, baseline_std,
+                      json.dumps(uncertainty_flags or []), confounder_status, action_accepted,
+                      action_completed, is_simulated, appraisal_category, row_id))
     conn.close()
     return row_id
 
@@ -110,6 +147,10 @@ def ingest_session_json(db_path: Path, session_json_path: Path) -> int:
         cause_id=data.get("cause_id"),
         intervention_id=data.get("intervention_id"),
         subjective_rating=data.get("subjective_rating"),
+        **{key: data.get(key) for key in ("session_id", "metric_source", "baseline_mean", "baseline_std",
+                                         "uncertainty_flags", "action_accepted", "action_completed",
+                                         "is_simulated", "appraisal_category")},
+        confounder_status=data.get("confounder_status", "UNVERIFIED"),
     )
 
 
@@ -161,9 +202,19 @@ def verify_next_day_recovery(
                 db_sources, next_date, window_days=28
             )
 
-            if not target_rec:
+            metric_key = row["trigger_metric"]
+            source = row["metric_source"]
+            # Legacy records have no source identity: retain provenance uncertainty.
+            if source is None and target_rec:
+                source = baseline_math.metric_source(target_rec, metric_key)
+                flags = json.loads(row["uncertainty_flags"] or "[]")
+                if "LEGACY_SOURCE_UNVERIFIED" not in flags:
+                    flags.append("LEGACY_SOURCE_UNVERIFIED")
+                conn.execute("UPDATE stress_ledger SET uncertainty_flags=? WHERE id=?", (json.dumps(flags), rec_id))
+            next_val = baseline_math.source_value(target_rec, metric_key, source)
+            if next_val is None:
                 days_pending = (datetime.now(timezone.utc) - dt_checkin.replace(tzinfo=timezone.utc)).days
-                if days_pending > 7:
+                if days_pending >= 2:
                     conn.execute(
                         """
                         UPDATE stress_ledger
@@ -175,21 +226,31 @@ def verify_next_day_recovery(
                     )
                 continue
 
-            metric_key = row["trigger_metric"]
-            next_val = target_rec.get(metric_key)
-            if next_val is None:
-                continue
-
             # Crucial: Exclude the check-in/anomaly day itself to prevent baseline contamination!
             metric_history = [
-                float(h[metric_key])
+                value
                 for h in history
-                if h.get(metric_key) is not None and h["date"] != checkin_date
+                if h["date"] < checkin_date
+                and (value := baseline_math.source_value(h, metric_key, source)) is not None
             ]
-            if len(metric_history) < min_history_days:
+            mean, std = row["baseline_mean"], row["baseline_std"]
+            if mean is None or std is None:
+                flags = json.loads(row["uncertainty_flags"] or "[]")
+                if "BASELINE_RECONSTRUCTED_UNVERIFIED" not in flags:
+                    flags.append("BASELINE_RECONSTRUCTED_UNVERIFIED")
+                if row["metric_source"] is None and "LEGACY_SOURCE_UNVERIFIED" not in flags:
+                    flags.append("LEGACY_SOURCE_UNVERIFIED")
+                conn.execute("UPDATE stress_ledger SET uncertainty_flags=? WHERE id=?", (json.dumps(flags), rec_id))
+                if len(metric_history) < min_history_days:
+                    if (datetime.now(timezone.utc) - dt_checkin.replace(tzinfo=timezone.utc)).days >= 2:
+                        conn.execute("UPDATE stress_ledger SET rebound_status='EXPIRED_NO_DATA', verified_at=? WHERE id=?",
+                                     (now_iso, rec_id))
+                    continue
+                mean, std = baseline_math.compute_mean_and_std(metric_history)
+            if std <= 1e-4:
+                conn.execute("UPDATE stress_ledger SET rebound_status='UNVERIFIABLE_BASELINE', verified_at=? WHERE id=?",
+                             (now_iso, rec_id))
                 continue
-
-            mean, std = baseline_math.compute_mean_and_std(metric_history)
             next_sigma = baseline_math.compute_z_score(float(next_val), mean, std)
             initial_sigma = row["deviation_sigma"]
 
@@ -273,11 +334,21 @@ def get_ledger_report(db_path: Path) -> Dict[str, Any]:
     dates = [r["date"] for r in all_rows if r["date"] is not None]
     date_range = f"{min(dates)} to {max(dates)}" if dates else "none"
 
-    # Group by intervention_id or intervention_type
+    eligible = [r for r in verified if r["action_completed"] == 1 and r["is_simulated"] == 0
+                and r["metric_source"] and not json.loads(r["uncertainty_flags"] or "[]")
+                and r["confounder_status"] == "NO_CONFOUNDER_DETECTED"
+                and r["appraisal_category"] not in (None, "UNCERTAIN")]
+    proposals = {}
+    for row in all_rows:
+        key = row["intervention_id"] or row["intervention_type"]
+        proposals[key] = proposals.get(key, 0) + 1
+    # Never pool different devices, measurement definitions, or simulated records.
     by_intervention: Dict[str, Dict[str, Any]] = {}
-    for r in verified:
-        int_key = r["intervention_id"] or r["intervention_type"]
+    for r in eligible:
+        int_id = r["intervention_id"] or r["intervention_type"]
+        int_key = json.dumps([int_id, r["metric_source"], r["trigger_metric"]])
         group = by_intervention.setdefault(int_key, {
+            "intervention_id": int_id, "metric_source": r["metric_source"], "metric": r["trigger_metric"],
             "count": 0,
             "confirmed": 0,
             "deltas": [],
@@ -291,15 +362,16 @@ def get_ledger_report(db_path: Path) -> Dict[str, Any]:
         if r["subjective_rating"] is not None:
             group["ratings"].append(r["subjective_rating"])
 
-    efficacy_summary: Dict[str, Any] = {}
+    observation_summary: Dict[str, Any] = {}
     for k, v in by_intervention.items():
         avg_delta = round(sum(v["deltas"]) / len(v["deltas"]), 2) if v["deltas"] else 0.0
         success_pct = round((v["confirmed"] / v["count"]) * 100.0, 1) if v["count"] > 0 else 0.0
         avg_rating = round(sum(v["ratings"]) / len(v["ratings"]), 1) if v["ratings"] else None
-        efficacy_summary[k] = {
+        observation_summary[k] = {
+            "intervention_id": v["intervention_id"], "metric_source": v["metric_source"], "metric": v["metric"],
             "total_trials": v["count"],
-            "has_minimum_sample": v["count"] >= 3,
-            "success_rate_pct": success_pct,
+            "has_minimum_sample": v["count"] >= 5,
+            "rebound_rate_pct": success_pct,
             "avg_rebound_delta_sigma": avg_delta,
             "avg_subjective_rating": avg_rating,
         }
@@ -310,14 +382,19 @@ def get_ledger_report(db_path: Path) -> Dict[str, Any]:
         "confirmed_rebounds": len(confirmed),
         "expired_entries": len(expired),
         "pending_entries": len(pending),
+        "overall_success_rate_pct": round((len(confirmed) / len(verified)) * 100.0, 1) if verified else 0.0,
         "date_range": date_range,
-        "overall_success_rate_pct": round((len(confirmed) / len(verified) * 100.0), 1) if verified else 0.0,
-        "interventions": efficacy_summary,
+        "interventions": observation_summary,
+        "proposals": proposals,
+        "excluded_from_action_summary": len(verified) - len(eligible),
+        "uncertain_entries": sum(bool(json.loads(r["uncertainty_flags"] or "[]"))
+                                 or r["confounder_status"] == "UNVERIFIED" for r in all_rows),
+        "completed_actions": sum(r["action_completed"] == 1 for r in all_rows),
     }
 
 
 def reflect_to_memory(db_path: Path, memory_path: Path) -> str:
-    """Update Profile/MEMORY.md with observed follow-up associations under strict context rent."""
+    """Update runtime memories/MEMORY.md with observed follow-up associations under strict context rent."""
     report = get_ledger_report(db_path)
     if not memory_path.is_file():
         raise FileNotFoundError(f"Memory document not found: {memory_path}")
@@ -337,9 +414,10 @@ def reflect_to_memory(db_path: Path, memory_path: Path) -> str:
         lines.append("* *Awaiting verified closed-loop ledger trials.*")
     else:
         for int_id, stats in sorted(int_summary.items(), key=lambda x: x[1]["avg_rebound_delta_sigma"], reverse=True):
-            label = id_to_label.get(int_id, int_id.replace("_", " ").title())
+            label = id_to_label.get(stats["intervention_id"], stats["intervention_id"].replace("_", " ").title())
+            label += f" ({stats['metric_source']}, {stats['metric']})"
             delta = stats["avg_rebound_delta_sigma"]
-            rate = stats["success_rate_pct"]
+            rate = stats["rebound_rate_pct"]
             trials = stats["total_trials"]
             sign = "+" if delta >= 0 else ""
 
@@ -352,6 +430,11 @@ def reflect_to_memory(db_path: Path, memory_path: Path) -> str:
                     f"* **{label}:** Observed in {trials} follow-up trial(s) (preliminary delta {sign}{delta}σ; sample too small for trend conclusion)."
                 )
 
+    for int_id, count in sorted(report["proposals"].items()):
+        label = id_to_label.get(int_id, int_id.replace("_", " ").title())
+        lines.append(f"* **{label}:** {count} proposal(s); proposing an action does not establish acceptance or completion.")
+    lines.append(f"* Uncertain records: {report['uncertain_entries']}; excluded from action summaries: "
+                 f"{report['excluded_from_action_summary']}. Follow-up changes do not establish causation.")
     new_section_content = (
         "## Intervention Follow-Up Ledger (Observed Biometric Associations)\n\n"
         f"Empirical follow-up observations (Date range: {report.get('date_range', 'n/a')}, "
@@ -379,7 +462,7 @@ def generate_weekly_recap(db_path: Path) -> str:
     verified_count = report.get("verified_entries", 0)
 
     if verified_count == 0 or not interventions:
-        return "Weekly Recap: Zero verified anomaly follow-ups this week; vitals maintained steady baseline."
+        return "Weekly Recap: Insufficient matched, completed-action follow-ups to summarize a trend."
 
     sorted_ints = sorted(
         interventions.items(),
@@ -387,7 +470,7 @@ def generate_weekly_recap(db_path: Path) -> str:
         reverse=True,
     )
     best_id, best_stats = sorted_ints[0]
-    best_name = best_id.replace("_", " ").title()
+    best_name = best_stats["intervention_id"].replace("_", " ").title()
     delta = best_stats["avg_rebound_delta_sigma"]
     sign = "+" if delta >= 0 else ""
     trials = best_stats["total_trials"]
@@ -395,15 +478,7 @@ def generate_weekly_recap(db_path: Path) -> str:
     if not best_stats["has_minimum_sample"]:
         return (
             f"Weekly Recap: {verified_count} follow-up check-in(s) recorded "
-            f"(preliminary observations; awaiting >=3 trials per habit)."
-        )
-
-    if len(sorted_ints) > 1 and sorted_ints[1][1]["has_minimum_sample"]:
-        second_id, second_stats = sorted_ints[1]
-        second_name = second_id.replace("_", " ").title()
-        return (
-            f"Weekly Recap: {best_name} associated with {sign}{delta}σ follow-up rebound, "
-            f"compared to {second_name} across {verified_count} verified trials."
+            f"(preliminary observations; awaiting >=5 completed actions per source and metric)."
         )
 
     return (
@@ -413,6 +488,7 @@ def generate_weekly_recap(db_path: Path) -> str:
 
 
 def main() -> int:
+    home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     parser = argparse.ArgumentParser(description="Stress outcome ledger CLI.")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -426,39 +502,39 @@ def main() -> int:
     add_p.add_argument("--cause-id", help="Canonical cause ID")
     add_p.add_argument("--intervention-id", help="Canonical intervention ID")
     add_p.add_argument("--rating", type=int, help="Subjective rating (1-10)")
-    add_p.add_argument("--db", default="data/ledger.db", help="Path to ledger SQLite DB")
+    add_p.add_argument("--db", default=str(home / "data" / "ledger.db"), help="Path to ledger SQLite DB")
 
     # 2. ingest
     ingest_p = subparsers.add_parser("ingest", help="Ingest a dialogue session summary JSON")
     ingest_p.add_argument("json_file", help="Path to session summary JSON")
-    ingest_p.add_argument("--db", default="data/ledger.db", help="Path to ledger SQLite DB")
+    ingest_p.add_argument("--db", default=str(home / "data" / "ledger.db"), help="Path to ledger SQLite DB")
 
     # 3. verify
     verify_p = subparsers.add_parser("verify", help="Verify next-day recovery")
     verify_p.add_argument("--next-day", action="store_true", default=True, help="Verify next day")
-    verify_p.add_argument("--db", default="data/ledger.db", help="Path to ledger DB")
-    verify_p.add_argument("--health-db", default="data/health.db", help="Path to health DB")
-    verify_p.add_argument("--garmin-db", default="data/garmin.db", help="Path to garmin DB")
+    verify_p.add_argument("--db", default=str(home / "data" / "ledger.db"), help="Path to ledger DB")
+    verify_p.add_argument("--health-db", default=str(home / "data" / "health.db"), help="Path to health DB")
+    verify_p.add_argument("--garmin-db", default=str(home / "data" / "garmin.db"), help="Path to garmin DB")
     verify_p.add_argument("--min-history-days", type=int, default=14, help="Min history days")
 
     # 4. report
     report_p = subparsers.add_parser("report", help="Report recovery stats")
-    report_p.add_argument("--db", default="data/ledger.db", help="Path to ledger DB")
+    report_p.add_argument("--db", default=str(home / "data" / "ledger.db"), help="Path to ledger DB")
 
     # 5. reflect
     reflect_p = subparsers.add_parser("reflect", help="Reflect verified habits into MEMORY.md")
-    reflect_p.add_argument("--db", default="data/ledger.db", help="Path to ledger DB")
-    reflect_p.add_argument("--memory-path", default="Profile/MEMORY.md", help="Path to MEMORY.md")
+    reflect_p.add_argument("--db", default=str(home / "data" / "ledger.db"), help="Path to ledger DB")
+    reflect_p.add_argument("--memory-path", default=str(home / "memories" / "MEMORY.md"), help="Path to MEMORY.md")
 
     # 6. recap
     recap_p = subparsers.add_parser("recap", help="Output weekly 1-line recap")
-    recap_p.add_argument("--db", default="data/ledger.db", help="Path to ledger DB")
+    recap_p.add_argument("--db", default=str(home / "data" / "ledger.db"), help="Path to ledger DB")
 
     args = parser.parse_args()
 
     if args.command == "add":
         row_id = add_ledger_entry(
-            db_path=Path(args.db),
+            db_path=Path(args.db).expanduser(),
             trigger_metric=args.trigger,
             attributed_cause=args.cause,
             intervention_type=args.intervention,
@@ -472,33 +548,33 @@ def main() -> int:
         return 0
 
     if args.command == "ingest":
-        row_id = ingest_session_json(Path(args.db), Path(args.json_file))
+        row_id = ingest_session_json(Path(args.db).expanduser(), Path(args.json_file))
         print(f"Ingested session into ledger entry #{row_id}")
         return 0
 
     if args.command == "verify":
         results = verify_next_day_recovery(
-            db_path=Path(args.db),
-            health_db_path=Path(args.health_db),
-            garmin_db_path=Path(args.garmin_db) if args.garmin_db else None,
+            db_path=Path(args.db).expanduser(),
+            health_db_path=Path(args.health_db).expanduser(),
+            garmin_db_path=Path(args.garmin_db).expanduser() if args.garmin_db else None,
             min_history_days=args.min_history_days,
         )
         print(json.dumps(results, indent=2))
         return 0
 
     if args.command == "report":
-        rep = get_ledger_report(Path(args.db))
+        rep = get_ledger_report(Path(args.db).expanduser())
         print(json.dumps(rep, indent=2))
         return 0
 
     if args.command == "reflect":
-        res = reflect_to_memory(Path(args.db), Path(args.memory_path))
+        res = reflect_to_memory(Path(args.db).expanduser(), Path(args.memory_path).expanduser())
         print("Updated MEMORY.md:")
         print(res)
         return 0
 
     if args.command == "recap":
-        recap = generate_weekly_recap(Path(args.db))
+        recap = generate_weekly_recap(Path(args.db).expanduser())
         print(recap)
         return 0
 

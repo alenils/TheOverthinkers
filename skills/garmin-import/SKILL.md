@@ -10,10 +10,10 @@ metadata:
     config:
       - key: health.health_dir
         description: "Root directory for health data and archives"
-        default: "~/health"
+        default: "~/.hermes/data"
       - key: health.garmin_db
         description: "SQLite database file for normalized Garmin records"
-        default: "~/health/garmin.db"
+        default: "~/.hermes/data/garmin.db"
     tags: [wearable, ingest, garmin, health]
 ---
 

@@ -1,211 +1,214 @@
 #!/usr/bin/env python3
-"""End-to-end orchestrator closing the Phase 1 loop.
-
-Connects:
-  Gate 1 (Ingest & Baseline Anomaly / Confounder Detection)
-  Gate 2 (Cognitive Appraisal & 1 Micro-Action Triage)
-  Gate 3 (Next-Day Biometric Verification, Outcome Ledger & Memory Reflection)
-"""
-
+"""Daily detection, durable bounded dialogue, and matched follow-up observations."""
 from __future__ import annotations
-
 import argparse
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
-from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-sys.path.insert(0, str(PROJECT_ROOT / "skills" / "detect-baseline" / "scripts"))
-sys.path.insert(0, str(PROJECT_ROOT / "skills" / "stress-dialogue" / "scripts"))
-sys.path.insert(0, str(PROJECT_ROOT / "skills" / "stress-ledger" / "scripts"))
-
-import baseline_math  # noqa: E402
-import dialogue_engine  # noqa: E402
-import ledger  # noqa: E402
-import messaging_gateway  # noqa: E402
-import simulate_trigger  # noqa: E402
+for folder in ("detect-baseline", "stress-dialogue", "stress-ledger"):
+    sys.path.insert(0, str(PROJECT_ROOT / "skills" / folder / "scripts"))
+import baseline_math
+import dialogue_engine
+import ledger
+import messaging_gateway as gateway
+import simulate_trigger
+from runtime_config import runtime_paths
 
 
-def get_runtime_paths() -> Dict[str, Path]:
-    """Resolve runtime paths outside the git checkout to preserve private-data boundary."""
-    hermes_home = os.environ.get("HERMES_HOME")
-    if hermes_home:
-        base = Path(hermes_home).expanduser()
+def local_now():
+    name = os.environ.get("STRESS_TIMEZONE", "UTC")
+    return datetime.now(timezone.utc if name == "UTC" else ZoneInfo(name))
+
+
+def get_runtime_paths():
+    return runtime_paths()
+
+
+def store_summary(db_path, summary):
+    if not summary.get("intervention_id"):
+        return None
+    return ledger.add_ledger_entry(
+        db_path=db_path, trigger_metric=summary["trigger_metric"],
+        attributed_cause=summary["attributed_cause"], intervention_type=summary["intervention_type"],
+        date_str=summary["date"], deviation_sigma=summary["deviation_sigma"],
+        **{key: summary.get(key) for key in (
+            "cause_id", "intervention_id", "subjective_rating", "session_id", "metric_source",
+            "baseline_mean", "baseline_std", "uncertainty_flags", "confounder_status",
+            "action_accepted", "action_completed", "is_simulated", "appraisal_category")})
+
+
+def resume_session(dispatcher, session_id, ledger_db):
+    """Replay journaled replies; stable coach IDs protect crash recovery from resends."""
+    data = dispatcher.load(session_id)
+    session = dialogue_engine.DialogueSession(data["context"]["anomaly"])
+    session.start()
+    simulated = data["context"]["anomaly"].get("is_simulated", False)
+    for event in data["events"]:
+        if event["direction"] != "INBOUND":
+            continue
+        if session.status == "ACTIVE":
+            reply = session.process_user_turn(event["text"], data["context"].get("subjective_rating"))
+            if reply:
+                outbound = dispatcher.dispatch(reply, session_id, simulated,
+                                               event_id=f"coach_{session.turn_count}")
+                if outbound.delivery_status not in ("DELIVERED", "MOCK_RECORDED"):
+                    return {"status": "DELIVERY_UNCERTAIN", "session_id": session_id}
+        else:
+            session.confirm_action(event["text"])
+    summary = session.get_summary()
+    summary.update(session_id=session_id, is_simulated=simulated)
+    entry_id = store_summary(ledger_db, summary)
+    current = dispatcher.load(session_id)
+    if session.confirmation_received:
+        current["status"] = "COMPLETED"
+    elif session.status != "ACTIVE":
+        current["status"] = "AWAITING_CONFIRMATION"
     else:
-        base = PROJECT_ROOT / ".runtime"
-
-    base.mkdir(parents=True, exist_ok=True)
-    (base / "data").mkdir(parents=True, exist_ok=True)
-    (base / "state").mkdir(parents=True, exist_ok=True)
-    (base / "Profile").mkdir(parents=True, exist_ok=True)
-
-    mem_file = base / "Profile" / "MEMORY.md"
-    if not mem_file.is_file():
-        template_mem = PROJECT_ROOT / "Profile" / "MEMORY.md"
-        if template_mem.is_file():
-            shutil.copy2(template_mem, mem_file)
-
-    return {
-        "health_db": base / "data" / "health.db",
-        "garmin_db": base / "data" / "garmin.db",
-        "ledger_db": base / "data" / "ledger.db",
-        "memory_path": mem_file,
-        "state_file": base / "state" / "dispatch_state.json",
-    }
+        current["status"] = "AWAITING_REPLY"
+    current["summary"] = summary
+    current["ledger_entry_id"] = entry_id
+    dispatcher.save(current)
+    return summary
 
 
-def run_pipeline(
-    target_date: str,
-    health_db: Path,
-    garmin_db: Optional[Path] = None,
-    ledger_db: Path = Path("data/ledger.db"),
-    memory_path: Path = Path("Profile/MEMORY.md"),
-    state_file: Path = Path(".state/dispatch_state.json"),
-    mock_reply: Optional[str] = None,
-    interactive: bool = False,
-    ignore_quiet_hours: bool = False,
-    subjective_rating: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Execute the full closed-loop daily cycle."""
-    pipeline_report: Dict[str, Any] = {
-        "date": target_date,
-        "step_1_verification": None,
-        "step_2_detection": None,
-        "step_3_dialogue": None,
-        "step_4_ledger_entry": None,
-    }
+def poll_once(dispatcher, ledger_db):
+    """Expire silently, recover journaled replies, then acknowledge processed updates."""
+    with gateway.ConcurrencyLock(dispatcher.spool_dir / ".worker.lock"):
+        for path in dispatcher.spool_dir.glob("session_*.json"):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            status = dispatcher.check_session_status(data["session_id"])
+            if status == "REPLY_RECEIVED":
+                resume_session(dispatcher, data["session_id"], ledger_db)
+        cursor_path = dispatcher.spool_dir / "telegram_cursor.json"
+        cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {"offset": 0}
+        processed = 0
+        for update in dispatcher.transport.updates(cursor["offset"]):
+            if update["update_id"] < cursor["offset"]:
+                continue
+            matched = dispatcher.correlate_update(update)
+            if matched:
+                session_id, text, event_id = matched
+                dispatcher.record_reply(session_id, text, event_id)
+                resume_session(dispatcher, session_id, ledger_db)
+                processed += 1
+            # Cursor advances only after the reply and downstream work are durable.
+            cursor["offset"] = update["update_id"] + 1
+            gateway.save_json(cursor_path, cursor)
+        return processed
 
-    # Step 1 (Gate 3): Verify any pending interventions from previous days
-    db_sources = [health_db]
-    if garmin_db and garmin_db.is_file():
-        db_sources.append(garmin_db)
 
-    verified = ledger.verify_next_day_recovery(
-        db_path=ledger_db,
-        health_db_path=health_db,
-        garmin_db_path=garmin_db if garmin_db and garmin_db.is_file() else None,
-    )
-    pipeline_report["step_1_verification"] = {
-        "verified_count": len(verified),
-        "details": verified,
-    }
+def run_pipeline(target_date, health_db, garmin_db=None, ledger_db=None, memory_path=None,
+                 state_file=None, mock_reply=None, interactive=False, ignore_quiet_hours=False,
+                 subjective_rating=None, channel=None, dispatcher=None, mock_confirmation=None):
+    paths = get_runtime_paths()
+    ledger_db = Path(ledger_db or paths["ledger_db"])
+    memory_path = Path(memory_path or paths["memory_path"])
+    state_file = Path(state_file or paths["state_file"])
+    report = {"date": target_date, "step_1_verification": None, "step_2_detection": None,
+              "step_3_dialogue": None, "step_4_ledger_entry": None}
+    verified = ledger.verify_next_day_recovery(ledger_db, health_db, garmin_db)
+    report["step_1_verification"] = {"verified_count": len(verified), "details": verified}
     if verified and memory_path.is_file():
         ledger.reflect_to_memory(ledger_db, memory_path)
-
-    # Step 2 (Gate 1): Rolling baseline & confounder check for target date
-    try:
-        target_rec, prior_rec, history = baseline_math.load_unified_series(
-            db_sources, target_date, window_days=28
-        )
-    except Exception as e:
-        pipeline_report["step_2_detection"] = {"status": "ERROR", "error": str(e)}
-        return pipeline_report
-
-    if not target_rec:
-        pipeline_report["step_2_detection"] = {
-            "status": "NO_DATA",
-            "message": f"No wearable data for {target_date}",
-        }
-        return pipeline_report
-
-    eval_result = baseline_math.evaluate_day_metrics(
-        target_rec=target_rec,
-        prior_rec=prior_rec,
-        history_recs=history,
-    )
-    pipeline_report["step_2_detection"] = eval_result
-
-    # If baseline is normal or suppressed by workout strain -> silence by default!
-    if not eval_result.get("dispatch_trigger"):
-        return pipeline_report
-
-    # Check quiet hours & once-per-day limit using user's local time
-    now_local = datetime.now().astimezone()
-    if not ignore_quiet_hours and not baseline_math.check_quiet_hours(now_local):
-        pipeline_report["step_2_detection"]["dispatch_suppressed"] = "Quiet hours"
-        return pipeline_report
-
-    lock_path = state_file.with_suffix(".lock")
-    with messaging_gateway.ConcurrencyLock(lock_path):
-        if not simulate_trigger.check_daily_dispatch(state_file, target_date):
-            pipeline_report["step_2_detection"]["dispatch_suppressed"] = "Already dispatched today"
-            return pipeline_report
-
-        # Step 3 (Gate 2): Cognitive appraisal check-in
-        eval_result["is_simulated"] = eval_result.get("is_simulated", True)
-        dialogue_summary = dialogue_engine.run_dialogue(
-            anomaly_payload=eval_result,
-            mock_responses=[mock_reply] if mock_reply else None,
-            interactive=interactive,
-            subjective_rating=subjective_rating,
-        )
-        pipeline_report["step_3_dialogue"] = dialogue_summary
-
-        # Record dispatch idempotency while holding the lock
-        simulate_trigger.record_dispatch(state_file, target_date)
-
-    # Step 4 (Gate 3): Ingest check-in into outcome ledger
-    entry_id = ledger.add_ledger_entry(
-        db_path=ledger_db,
-        trigger_metric=dialogue_summary.get("trigger_metric", "hrv_score"),
-        attributed_cause=dialogue_summary.get("attributed_cause", "Unspecified friction"),
-        intervention_type=dialogue_summary.get("intervention_type", "Standard pause"),
-        date_str=target_date,
-        deviation_sigma=dialogue_summary.get("deviation_sigma", -1.5),
-        cause_id=dialogue_summary.get("cause_id"),
-        intervention_id=dialogue_summary.get("intervention_id"),
-        subjective_rating=dialogue_summary.get("subjective_rating"),
-    )
-    pipeline_report["step_4_ledger_entry"] = {"entry_id": entry_id, "status": "RECORDED"}
-
-    return pipeline_report
+    sources = [health_db] + ([garmin_db] if garmin_db and garmin_db.is_file() else [])
+    target, prior, history = baseline_math.load_unified_series(sources, target_date)
+    if not target:
+        report["step_2_detection"] = {"status": "NO_DATA"}
+        return report
+    anomaly = baseline_math.evaluate_day_metrics(target, prior, history)
+    report["step_2_detection"] = anomaly
+    if not anomaly.get("dispatch_trigger"):
+        return report
+    now = local_now()
+    if not ignore_quiet_hours and not baseline_math.check_quiet_hours(now, os.environ.get("STRESS_ALLOWED_HOURS", "08:00-21:00")):
+        anomaly["dispatch_suppressed"] = "Quiet hours"
+        return report
+    channel = channel or ("mock" if mock_reply is not None or interactive else None)
+    if dispatcher is None and channel is None:
+        anomaly["dispatch_suppressed"] = "No channel selected; use --channel telegram or explicit mock/interactive mode"
+        return report
+    dispatcher = dispatcher or gateway.ChannelDispatcher(channel, state_file.parent / "messaging")
+    anomaly["is_simulated"] = dispatcher.channel == "mock"
+    date_key = now.strftime("%Y-%m-%d")
+    # The anomaly date identifies the measurement; the local date limits outreach.
+    with gateway.ConcurrencyLock(state_file.with_suffix(".lock")):
+        if not simulate_trigger.check_daily_dispatch(state_file, date_key):
+            anomaly["dispatch_suppressed"] = "Already dispatched today"
+            return report
+        simulate_trigger.record_dispatch(state_file, date_key)  # Reserve before HTTP.
+        session = dialogue_engine.DialogueSession(anomaly)
+        outbound = dispatcher.dispatch(session.start(), is_simulated=anomaly["is_simulated"],
+                                       event_id="coach_1", context={"anomaly": anomaly, "subjective_rating": subjective_rating})
+    session_id = outbound.session_id
+    summary = session.get_summary()
+    summary.update(session_id=session_id, is_simulated=anomaly["is_simulated"])
+    if interactive:
+        print(outbound.text)
+        try:
+            mock_reply = input("[User reply]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            mock_reply = None
+    if mock_reply and dispatcher.channel == "mock":
+        dispatcher.record_reply(session_id, mock_reply, event_id="mock_context")
+        summary = resume_session(dispatcher, session_id, ledger_db)
+        while interactive and summary["status"] == "ACTIVE":
+            print(summary["transcript"][-1]["message"])
+            try:
+                text = input("[User reply]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not text:
+                break
+            dispatcher.record_reply(session_id, text)
+            summary = resume_session(dispatcher, session_id, ledger_db)
+        if summary.get("intervention_id"):
+            if interactive:
+                print(summary["transcript"][-1]["message"])
+                try:
+                    mock_confirmation = input("[Action confirmation, optional]: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    mock_confirmation = None
+            if mock_confirmation:
+                dispatcher.record_reply(session_id, mock_confirmation, event_id="mock_confirmation")
+                summary = resume_session(dispatcher, session_id, ledger_db)
+    report["step_3_dialogue"] = summary
+    data = dispatcher.load(session_id)
+    if data.get("ledger_entry_id"):
+        report["step_4_ledger_entry"] = {"entry_id": data["ledger_entry_id"], "status": "RECORDED"}
+    return report
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="The Overthinkers closed-loop orchestrator.")
-    parser.add_argument("--date", help="Target date YYYY-MM-DD (defaults to today)")
-    parser.add_argument("--health-db", help="Path to health DB")
-    parser.add_argument("--garmin-db", help="Path to Garmin DB")
-    parser.add_argument("--ledger-db", help="Path to ledger DB")
-    parser.add_argument("--memory-path", help="Path to MEMORY.md")
-    parser.add_argument("--state-file", help="Path to state file")
-    parser.add_argument("--mock-reply", help="Mock user reply string")
-    parser.add_argument("--interactive", action="store_true", help="Interactive terminal dialogue")
-    parser.add_argument("--ignore-quiet-hours", action="store_true", default=False, help="Bypass quiet hours")
-    parser.add_argument("--recap", action="store_true", help="Print weekly trend recap and exit")
-
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("date", "health-db", "garmin-db", "ledger-db", "memory-path", "state-file", "mock-reply", "mock-confirmation"):
+        parser.add_argument(f"--{name}")
+    parser.add_argument("--channel", choices=["telegram", "mock"])
+    for name in ("interactive", "ignore-quiet-hours", "recap", "poll", "watch"):
+        parser.add_argument(f"--{name}", action="store_true")
     args = parser.parse_args()
-
-    runtime_defaults = get_runtime_paths()
-    health_p = Path(args.health_db) if args.health_db else runtime_defaults["health_db"]
-    garmin_p = Path(args.garmin_db) if args.garmin_db else runtime_defaults["garmin_db"]
-    ledger_p = Path(args.ledger_db) if args.ledger_db else runtime_defaults["ledger_db"]
-    memory_p = Path(args.memory_path) if args.memory_path else runtime_defaults["memory_path"]
-    state_p = Path(args.state_file) if args.state_file else runtime_defaults["state_file"]
-
+    paths = get_runtime_paths()
+    for name in paths:
+        if getattr(args, name, None):
+            paths[name] = Path(getattr(args, name)).expanduser()
     if args.recap:
-        print(ledger.generate_weekly_recap(ledger_p))
-        return 0
-
-    target = args.date or datetime.now().astimezone().strftime("%Y-%m-%d")
-    report = run_pipeline(
-        target_date=target,
-        health_db=health_p,
-        garmin_db=garmin_p if garmin_p.is_file() else None,
-        ledger_db=ledger_p,
-        memory_path=memory_p,
-        state_file=state_p,
-        mock_reply=args.mock_reply,
-        interactive=args.interactive,
-        ignore_quiet_hours=args.ignore_quiet_hours,
-    )
-
-    print(json.dumps(report, indent=2))
+        print(ledger.generate_weekly_recap(paths["ledger_db"]))
+    elif args.poll or args.watch:
+        dispatcher = gateway.ChannelDispatcher("telegram", paths["state_file"].parent / "messaging")
+        while True:
+            print(json.dumps({"processed_updates": poll_once(dispatcher, paths["ledger_db"])}), flush=True)
+            if not args.watch:
+                break
+    else:
+        report = run_pipeline(args.date or local_now().strftime("%Y-%m-%d"), **paths,
+                              mock_reply=args.mock_reply, mock_confirmation=args.mock_confirmation,
+                              interactive=args.interactive, channel=args.channel,
+                              ignore_quiet_hours=args.ignore_quiet_hours)
+        print(json.dumps(report, indent=2))
     return 0
 
 

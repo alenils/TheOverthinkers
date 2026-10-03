@@ -10,10 +10,10 @@ metadata:
     config:
       - key: health.health_dir
         description: "Root directory for health data and archives"
-        default: "~/health"
+        default: "~/.hermes/data"
       - key: health.health_db
         description: "SQLite database file for normalized health records"
-        default: "~/health/health.db"
+        default: "~/.hermes/data/health.db"
     tags: [wearable, ingest, samsung, health]
 ---
 

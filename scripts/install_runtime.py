@@ -4,19 +4,20 @@
 Bootstraps the runtime environment outside the git checkout:
   - Validates Python >= 3.11
   - Installs skills into $HERMES_HOME/skills/
-  - Scaffolds $HERMES_HOME/Profile/ preserving existing personalized files
+  - Scaffolds SOUL.md and memories/{USER,MEMORY}.md preserving personal files
   - Initializes storage paths for biometric DBs, ledger, and concurrency locks
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 import shutil
 import sys
+from datetime import datetime, timezone
 from typing import Dict, List
 
+from runtime_config import runtime_home
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -28,10 +29,7 @@ def check_environment() -> None:
 
 def get_default_runtime_dir() -> Path:
     """Resolve default runtime directory from environment or fallback."""
-    env_home = os.environ.get("HERMES_HOME")
-    if env_home:
-        return Path(env_home).expanduser()
-    return Path.home() / ".hermes"
+    return runtime_home()
 
 
 def install_runtime(
@@ -46,13 +44,14 @@ def install_runtime(
         "installed_skills": [],
         "scaffolded_profiles": [],
         "preserved_profiles": [],
+        "skill_backups": [],
     }
 
     skills_src = PROJECT_ROOT / "skills"
     profiles_src = PROJECT_ROOT / "Profile"
 
     skills_dest = dest_dir / "skills"
-    profiles_dest = dest_dir / "Profile"
+    profiles_dest = dest_dir / "memories"
     data_dest = dest_dir / "data"
     state_dest = dest_dir / "state"
 
@@ -70,7 +69,10 @@ def install_runtime(
                 target_sk = skills_dest / sk_dir.name
                 if not dry_run:
                     if target_sk.exists():
-                        shutil.rmtree(target_sk)
+                        backup = dest_dir / "backups" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f") / sk_dir.name
+                        backup.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(target_sk), str(backup))
+                        report["skill_backups"].append(str(backup))
                     shutil.copytree(sk_dir, target_sk)
                 report["installed_skills"].append(sk_dir.name)
 
@@ -78,12 +80,13 @@ def install_runtime(
     if profiles_src.is_dir():
         for p_file in sorted(profiles_src.iterdir()):
             if p_file.is_file() and p_file.name.endswith(".md"):
-                target_p = profiles_dest / p_file.name
+                target_p = (dest_dir if p_file.name == "SOUL.md" else profiles_dest) / p_file.name
+                legacy_p = dest_dir / "Profile" / p_file.name
                 if target_p.is_file():
                     report["preserved_profiles"].append(p_file.name)
                 else:
                     if not dry_run:
-                        shutil.copy2(p_file, target_p)
+                        shutil.copy2(legacy_p if legacy_p.is_file() else p_file, target_p)
                     report["scaffolded_profiles"].append(p_file.name)
 
     return report

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -157,13 +158,14 @@ def import_archive_to_db(zip_path: Path, db_path: Path) -> int:
 
 
 def main() -> int:
+    home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     parser = argparse.ArgumentParser(description="Import Garmin Connect export archives into SQLite.")
     parser.add_argument("--zip-path", help="Path to Garmin Connect export zip")
     parser.add_argument("--dir", help="Directory containing Garmin export archives")
-    parser.add_argument("--db-path", default="data/garmin.db", help="Path to SQLite Garmin database")
+    parser.add_argument("--db-path", default=str(home / "data" / "garmin.db"), help="Path to SQLite Garmin database")
 
     args = parser.parse_args()
-    db_path = Path(args.db_path)
+    db_path = Path(args.db_path).expanduser()
 
     if args.zip_path:
         zip_p = Path(args.zip_path)

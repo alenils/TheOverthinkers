@@ -81,7 +81,7 @@ def check_daily_dispatch(state_path: Path, date_str: str) -> bool:
         dispatched_dates = data.get("dispatched_dates", [])
         return date_str not in dispatched_dates
     except Exception:
-        return True
+        return False  # Corrupt dispatch state must not reset the daily limit.
 
 
 def record_dispatch(state_path: Path, date_str: str) -> None:
@@ -96,9 +96,7 @@ def record_dispatch(state_path: Path, date_str: str) -> None:
     if date_str not in data.setdefault("dispatched_dates", []):
         data["dispatched_dates"].append(date_str)
 
-    tmp_path = state_path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp_path.replace(state_path)
+    messaging_gateway.save_json(state_path, data)
 
 
 def detect_rumination(text: str) -> bool:
@@ -139,7 +137,7 @@ def generate_observer_reply(user_text: str, soul_content: str | None = None) -> 
         action = "Take a 10-minute walk without your phone to step outside the problem and reset your perspective."
 
     return (
-        f"Understood. Stepping back to observe the pattern: the body is responding to immediate load. "
+        f"Understood. That is a possible contributing factor; the cause remains uncertain. "
         f"Prescribed micro-action: {action} "
         f"Checking back in tomorrow morning to evaluate recovery."
     )
@@ -173,7 +171,8 @@ def run_session(
             }
 
     # 2. Concurrency-Safe Silence by Default / Once-Per-Day Enforcement
-    s_path = state_file if state_file is not None else (root / ".state" / "dispatch_state.json")
+    from runtime_config import runtime_paths
+    s_path = state_file if state_file is not None else runtime_paths()["state_file"]
     lock_path = s_path.with_suffix(".lock")
 
     with messaging_gateway.ConcurrencyLock(lock_path):
@@ -185,9 +184,9 @@ def run_session(
                     "date": date_str,
                 }
 
-        dispatcher = messaging_gateway.ChannelDispatcher(channel="hermes_cli")
+        dispatcher = messaging_gateway.ChannelDispatcher(channel="mock", spool_dir=s_path.parent / "messaging")
         session_id = str(uuid.uuid4())
-        is_mock = anomaly_data.get("is_simulated", True)
+        is_mock = True
 
         turns: List[Dict[str, str]] = []
 
@@ -195,6 +194,8 @@ def run_session(
         turn1_msg = dispatcher.format_outbound_text(DEFAULT_OPENING, is_simulated=is_mock)
         outbound_evt = dispatcher.dispatch(turn1_msg, session_id=session_id, is_simulated=is_mock)
         turns.append({"turn": 1, "speaker": "coach", "message": turn1_msg, "event_id": outbound_evt.event_id})
+        if not ignore_daily_limit:
+            record_dispatch(s_path, date_str)
 
         if interactive:
             print(f"[Coach Turn 1]: {turn1_msg}")
@@ -206,14 +207,22 @@ def run_session(
             user_input = (
                 mock_reply.strip()
                 if mock_reply is not None
-                else "I have a major deadline today and three back-to-back reviews."
+                else ""
             )
+
+        if not user_input:
+            return {"status": "AWAITING_REPLY", "turn_count": 1, "max_turns": 2,
+                    "session_id": session_id, "transcript": turns, "profile_loaded": list(profile)}
 
         reply_evt = dispatcher.record_reply(session_id, user_input)
         turns.append({"turn": 1, "speaker": "user", "message": user_input, "event_id": reply_evt.event_id})
 
         # Turn 2: Concise observer acknowledgment + single micro-action
         turn2_msg = generate_observer_reply(user_input, soul_content=profile.get("SOUL.md"))
+        dispatcher.dispatch(turn2_msg, session_id=session_id, is_simulated=True)
+        completed = dispatcher.load(session_id)
+        completed["status"] = "COMPLETED"
+        dispatcher.save(completed)
         turns.append({"turn": 2, "speaker": "coach", "message": turn2_msg})
 
         if interactive:
@@ -248,7 +257,7 @@ def main() -> int:
     parser.add_argument("--output", default=None, help="Save transcript JSON to path")
     parser.add_argument("--profile-dir", default=None, help="Path to Profile directory")
     parser.add_argument("--state-file", default=None, help="Path to dispatch state file")
-    parser.add_argument("--ignore-quiet-hours", action="store_true", default=True, help="Bypass quiet hours check")
+    parser.add_argument("--ignore-quiet-hours", action="store_true", default=False, help="Bypass quiet hours check")
     parser.add_argument("--ignore-daily-limit", action="store_true", default=False, help="Bypass once-per-day check")
 
     args = parser.parse_args()

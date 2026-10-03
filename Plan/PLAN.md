@@ -2,9 +2,11 @@
 
 This document is the canonical **vertical delivery plan** for **The Overthinkers** on the **Hermes Agent**.
 
-It synthesizes the research and flowcharts from [`Research/stress-dialogue-loop.md`](../Research/stress-dialogue-loop.md) and [`Research/Ieva Diagram.md`](../Research/Ieva%20Diagram.md), adopting the proven architectural patterns, skill layout, profile hierarchy, and quality gates from [`pridiuksson/highlander-longevity-coach`](https://github.com/pridiuksson/highlander-longevity-coach).
+It draws on the architectural patterns, skill layout, profile hierarchy, and quality gates from [`pridiuksson/highlander-longevity-coach`](https://github.com/pridiuksson/highlander-longevity-coach). Reuse of those patterns does not establish the efficacy of this coaching workflow.
 
-The core thesis follows the **80/20 delivery principle**: ship 80% of real-world value (connecting wearable biometric anomalies to causal attribution, prescribing exactly 1 micro-action, and validating biometric recovery closed-loop) with 20% of the surface area, while deferring complex clinical psychodynamics (IFS parts mapping, imagery rescripting, real-time rumination state machines) to **Future Plans**.
+The core thesis follows the **80/20 delivery principle**: prioritize possible contributing explanations, one micro-action, and recorded follow-up, while deferring complex clinical psychodynamics (IFS parts mapping, imagery rescripting, real-time rumination state machines) to **Future Plans**. The 80/20 framing is a scope heuristic, not a measured outcome claim.
+
+**Implementation status:** Profiles, six skills, import helpers, a Telegram transport, and regression tests now exist. The deterministic dialogue is not an LLM/Hermes inference bridge. Live messaging and profile discovery remain acceptance checks on the configured runtime; local tests alone do not establish them.
 
 ---
 
@@ -21,11 +23,11 @@ The Overthinkers directly inherits the core design invariants from Highlander:
 1. **"Silence is free; speech is ledgered."**
    * The coach defaults to silence. Proactive outreach occurs at most **once per day**, strictly when an anomaly crosses threshold. Normal variance equals silence.
 2. **"Compare against the person's own baseline, never a population norm."**
-   * Triggers fire on personal slope breaks ($\mu \pm 1.5\sigma$ over a rolling 14–28 day window), never on generic population averages.
+   * V1 uses directional deviations from a personal rolling baseline, never generic population averages. Level deviations and daily step-change deviations are separate heuristics. Neither establishes psychological stress.
 3. **The Evidence & Confounder Interlock:**
-   * Nothing reaches conversational triage unverified. An autonomic drop explained by athletic exertion (strain/load jump) is tagged as physical fatigue and suppressed from psychological check-ins.
+   * Check data quality and potential confounders before conversational triage. Elevated workout load is a possible physical explanation, not proof of cause. Absence of a workout explanation does not establish psychological stress.
 4. **Adversarial Restraint & Anti-Rumination Cap:**
-   * Conversations are bounded to **$\le 2$ to $3$ turns maximum**. Open-ended venting is treated as a clinical hazard (rumination spiral); the agent clarifies the cause, prescribes one micro-action, and exits.
+   * Conversations are bounded to **2 agent messages in Gate 0 and 3 in Gate 2**, including the closing message. The agent explores a possible explanation, offers at most one micro-action, and exits. The cap is a product boundary, not a validated guarantee against rumination.
 5. **Profile / Memory Rent Architecture:**
    * Three-tier separation: AI persona (`SOUL.md`), human baseline (`USER.md`), and living state (`MEMORY.md`).
 6. **Hermes Skill Contract:**
@@ -41,7 +43,7 @@ Following the Highlander profile pattern, configuration is decoupled into three 
 Profile/
 ├── SOUL.md          # Tier 1: The AI's Mind (Persona, cadence, cognitive boundaries)
 ├── USER.md          # Tier 2: The Human's Context (Biometric sources, work/stress patterns)
-└── MEMORY.md        # Tier 3: Living Memory (Intervention efficacy ledger, verified anchors)
+└── MEMORY.md        # Tier 3: Living Memory (Observed associations, uncertainty)
 ```
 
 ### Tier 1: Canonical `SOUL.md` Personas (The AI's Mind)
@@ -57,11 +59,18 @@ Durable facts that pay context rent every turn:
 * Physical training profile (Zone 2, strength days, typical strain levels) to ensure accurate confounder filtering.
 * Notification channel & quiet hours window.
 
-### Tier 3: `MEMORY.md` Working State (The Efficacy Ledger)
+### Tier 3: `MEMORY.md` Working State (Observed Associations)
 Strict rent rules apply (no raw metric dumps; audited for staleness):
 * **Active Stressors:** Current high-bandwidth projects or ongoing friction points.
-* **Intervention Efficacy History:** What micro-interventions actually normalized HRV for this user (e.g., *"15-min afternoon walk $\rightarrow$ +18% next-day HRV rebound; task reprioritization $\rightarrow$ neutral"*).
+* **Intervention Observation History:** Tentative associations between actions, subjective feedback, and later readings. Retain observation count, date range, missing follow-ups, known confounders, and uncertainty. An isolated improvement is an observation, not an established habit or causal effect.
 * **Standing Rules:** Personal constraints and communication preferences.
+
+### Runtime Installation & Data Boundary
+* Commit only generic `Profile/` templates. During Gate 0, an explicit bootstrap step installs the persona into Hermes' runtime `SOUL.md` and the context/memory scaffolds into its runtime memory directory, after checking the installed Hermes version's supported paths.
+* Preview target paths, back up existing runtime files, and preserve personalized content. Re-running bootstrap must not overwrite user context or memory.
+* Install each self-contained skill into the configured Hermes skills directory and verify discovery with `hermes skills list`.
+* Keep populated profiles, credentials, biometric storage, and the outcome ledger outside the Git checkout. Resolve paths from configuration; never copy personal runtime data back into templates.
+* Gate 0 must verify that the installed persona and context are actually loaded; copying files alone is insufficient.
 
 ---
 
@@ -106,8 +115,8 @@ metadata:
       - key: stress.max_turns
         description: "Hard cap on conversational turns to prevent rumination"
         default: "3"
-      - key: stress.quiet_hours
-        description: "Time window when proactive pings are allowed"
+      - key: stress.allowed_hours
+        description: "Local time window when proactive pings are allowed"
         default: "08:00-21:00"
     tags: [stress, appraisal, coaching]
 ---
@@ -119,6 +128,8 @@ metadata:
 
 Each gate is a self-contained, testable vertical slice delivering end-to-end functionality from trigger to action.
 
+**Hackathon delivery order:** Gate 0, then a simplified Gate 2 driven by explicitly labeled mock data, plus minimal outcome recording. Demonstrate trigger → short conversation → one optional action → recorded follow-up. Gate 1 and automated Gate 3 follow after this path works; simulated readings must never be presented as actual wearable measurements.
+
 ```mermaid
 flowchart TD
     G0["Gate 0: Steel Thread & Profile Bootstrap<br/>(Mock Trigger → Observer Check-In ≤ 2 turns)"]
@@ -126,6 +137,7 @@ flowchart TD
     G2["Gate 2: Cognitive Appraisal & Action Triage<br/>(Distress vs Eustress vs Drain in stress-dialogue)"]
     G3["Gate 3: Closed-Loop Outcome Ledger<br/>(Next-day HRV verification in stress-ledger)"]
 
+    G0 -->|"Hackathon: labeled mock data"| G2
     G0 --> G1 --> G2 --> G3
 ```
 
@@ -136,16 +148,20 @@ flowchart TD
 
 * **What Ships:**
   * Initial `Profile/` templates: `SOUL.md` (Observer), `USER.md` (scaffold), `MEMORY.md`.
-  * Messaging gateway dispatcher (`scripts/messaging_gateway.py`) with correlation IDs, reply TTL, and concurrency locking.
-  * Anomaly trigger simulation (`scripts/simulate_trigger.py`) labeling mock alerts explicitly.
+  * Mock anomaly trigger script (`scripts/simulate_trigger.py`).
+  * One initial channel: **Telegram**. Additional channels are deferred. Bind replies to the intended user/session; do not accept unrelated chat messages as responses.
+  * Durable event/session IDs deduplicate triggers and replies across restarts. Dispatch state must prevent uncertain delivery from being automatically resent; record it for inspection instead.
   * Outbound check-in using self-distanced observer framing:
-    > *"[Simulated Alert] Morning. Biometrics show an autonomic dip. Looking at your day from the outside, what's taking up your bandwidth?"*
+    > *"Demo check-in using simulated data. Looking at your day from the outside, what's taking up your bandwidth?"*
   * User reply capture, concise acknowledgment, and immediate session termination ($\le 2$ turns).
-* **80/20 Leverage:** Confirms user engagement, channel routing, and prompt tone without depending on live health APIs.
+  * **Turn contract:** One turn means one outbound agent message, including the close. Gate 0 sends the opening and, if the user replies, one acknowledgment. Retries and multipart sends must not bypass the message budget.
+  * **No reply:** Expire the session after a configurable timeout (default: 1 hour), without a reminder. Late replies must not reopen the expired automated session.
 * **Highlander Pattern Adopted:** Strict anti-verbosity ceiling; single-question intake; conversation hard-stop.
 * **Ship / Acceptance Criteria:**
-  * [ ] Mock trigger successfully dispatches outbound message via Hermes CLI or messaging gateway.
-  * [ ] User response is captured and logged.
+  * [ ] Mock trigger sends one labeled check-in through Telegram; the intended user's reply is captured and logged.
+  * [ ] Runtime profiles load correctly; repeat bootstrap preserves existing personal content.
+  * [ ] Repeated trigger/reply IDs and restart fixtures do not send duplicate check-ins or acknowledgments.
+  * [ ] Missing replies expire silently; late and unrelated replies are handled without reopening the session.
   * [ ] Agent uses 3rd-person observer framing without psychoanalyzing.
   * [ ] Conversation terminates in $\le 2$ turns.
   * [ ] `./scripts/leak-scan.sh .` passes with zero violations.
@@ -156,47 +172,48 @@ flowchart TD
 > **Goal:** Ingest real Samsung / Garmin wearable data, compute individual rolling baselines, and filter out athletic fatigue.
 
 * **What Ships:**
-  * **Wearable Ingestion Pipeline:**
-    * Integration of Highlander's `samsung-health-import` (reads Samsung Health export zips) and `garmin-import` (reads Garmin JSON + FIT exports).
-    * Normalized extraction view producing daily tuples: `{date, hrv_rmssd, resting_hr, sleep_fragmentation, workout_strain_score}`.
-  * **`skills/detect-baseline/SKILL.md` + calculation helper `scripts/baseline_math.py`:**
-    * **Rolling Baseline Engine:** Computes 14–28 day rolling mean and standard deviation ($\mu \pm 1.5\sigma$) and step-change trajectory deltas on HRV and sleep fragmentation. Flags zero-variance data as insufficient to prevent spurious alerts.
-    * **Workout Confounder Filter:** Cross-checks previous day's athletic load / strain from Samsung/Garmin.
-      * If strain jumped significantly $\rightarrow$ Tag as *Physical Recovery Strain*, log recovery status, stay silent.
-      * If workout records are missing $\rightarrow$ Tag as *Workout Data Missing Unverified*, surfacing uncertainty.
-      * If no workout confounder $\rightarrow$ Dispatches anomaly trigger to Gate 2.
-    * **Silence Default:** Maximum 1 check-in per day; zero alerts if metrics are within normal variance.
-* **80/20 Leverage:** Filters out athletic fatigue spikes caused by high-strain workout days, reducing spurious mental stress alerts while isolating genuine unconfounded anomalies.
-* **Highlander Pattern Adopted:** "Compare against own baseline, never population norm"; adversarial evidence filter; watch-folder export ingestion.
+  * `skills/detect-baseline/SKILL.md` + calculation helper `scripts/baseline_math.py`.
+  * **Rolling Baseline Engine (initial testable heuristic):** For each metric, use up to 28 calendar days preceding the candidate night, excluding that night. Require at least 14 valid nightly readings from the same source and measurement definition. Compute sample mean and sample standard deviation, then `z = (candidate - mean) / standard_deviation`.
+    * Flag low HRV at `z <= -1.5`, high sleep fragmentation at `z >= 1.5`. One eligible flagged metric creates one candidate event; simultaneous flags are bundled.
+    * Missing or invalid candidate data, insufficient history, or zero baseline variance make that metric ineligible. Do not impute zeros or mix devices/units. If all metrics are ineligible, return `insufficient_data` and stay silent.
+    * Thresholds are configurable starting hypotheses to evaluate with fixtures and pilot observations, not validated psychological-stress cutoffs. The helper also checks the candidate daily delta against historical daily deltas only with consecutive, same-source history and nonzero delta variance. This is a step-change heuristic, not fitted trend segmentation.
+  * **Workout Confounder Filter:** Cross-checks previous day's athletic load / strain.
+    * Compare a single provider's daily load against its preceding 28-day load baseline, requiring 14 valid days. Treat load at the configured absolute threshold or above `mean + 1.5 * sample_standard_deviation` as elevated. The absolute threshold is a fallback when strain history has no variance; neither rule proves causation.
+    * If load is elevated, record `possible_physical_recovery`, suppress the automated psychological check-in, and avoid asserting a confirmed cause.
+    * If prior load or its same-source history is unavailable, record `WORKOUT_DATA_MISSING_UNVERIFIED` or `WORKOUT_HISTORY_UNVERIFIED` and stay silent for proactive v1; user-initiated dialogue remains available.
+    * Otherwise dispatch a neutral anomaly check-in to Gate 2 with source, flags, and uncertainty. Do not label the user psychologically stressed from readings alone.
+  * **Silence Default:** Maximum 1 check-in per day; zero alerts if metrics are within normal variance.
+  * Enforce the daily limit durably using the configured IANA timezone and allowed notification hours, including after process restarts.
+* **Highlander Pattern Adopted:** "Compare against own baseline, never population norm"; adversarial evidence filter.
 * **Ship / Acceptance Criteria:**
-  * [ ] Sample Samsung Health export zip and Garmin export zip parse into local SQLite without errors.
-  * [ ] Unit tests verify slope break detection over 28-day synthetic/real time-series data.
-  * [ ] High-strain workout days successfully suppress mental stress check-ins.
-  * [ ] Hermes cron triggers only when an authentic anomaly occurs.
-  * [ ] `python3 scripts/validate-skills.py .` passes for `detect-baseline`, `samsung-health-import`, and `garmin-import`.
+  * [ ] Unit tests pass over 28-day synthetic biometric fixtures (`tests/test_gate1_baseline.py`).
+  * [ ] Fixtures cover both deviation directions, threshold boundaries, exclusion of the candidate night, missing readings, short history, zero variance, and multiple simultaneous flags.
+  * [ ] Workout strain fixture suppresses the psychological check-in cleanly.
+  * [ ] Unknown workout load/history produces an explicit uncertain state and no proactive ping.
+  * [ ] Daily deduplication and notification-hour checks survive restart and timezone date boundaries.
+  * [ ] `python3 scripts/validate-skills.py .` passes for `detect-baseline`.
 
 ---
 
 ### Gate 2: Cognitive Appraisal & Action Triage (`skills/stress-dialogue`)
-> **Goal:** Rapidly attribute the root cause and prescribe exactly 1 actionable micro-intervention.
+> **Goal:** Explore a possible contributing explanation and offer one optional, actionable micro-step when appropriate.
 
 * **What Ships:**
   * `skills/stress-dialogue/SKILL.md` implementing the `Diagram.md` appraisal matrix.
   * 2–3 turn structured check-in:
-    1. **Context Extraction:** User names the root friction (workload, interpersonal conflict, physical illness, uncertainty).
-    2. **Cognitive Appraisal (`Diagram.md` model):**
-       * *High Control / Challenge (Eustress-like):* Reinforce productive stress, assist in single-task focus or boundary defense.
-       * *Low Control / Threat (Distress-like):* Prescribe nervous system down-regulation (physiological sigh, 5-minute outdoor walk, box breathing, grounding).
-       * *Recovery Strain / Chronic Drain:* Poor recovery accumulation $\rightarrow$ Recommend active rest, evening boundary protection, sleep window defense.
-       * *Uncertain (Insufficient Evidence):* Ask exactly 1 clarifying follow-up question before concluding.
-    3. **Micro-Action Commitment:** Exactly 1 actionable micro-step confirmed; agent locks it in and exits.
-* **80/20 Leverage:** Focuses on immediate, actionable clarity and coping momentum rather than open-ended rumination or heavy psychiatric diagnosis.
+    1. **Context Extraction:** User describes possible contributing factors (workload, conflict, health, uncertainty). Record these as user-reported explanations, not verified root causes.
+    2. **Cognitive Appraisal:**
+       * *Low Control / Threat (Distress):* Prescribe nervous system down-regulation (physiological sigh, 5-minute outdoor walk, box breathing).
+       * *High Control / Challenge (Eustress):* Prescribe friction reduction (single-task priority focus, blocking distractions).
+       * *Cumulative Drain (Exhaustion):* Prescribe boundary protection (evening shutdown anchor, sleep window defense).
+       * *Uncertain / Mixed:* Ask at most one clarifying question within the existing budget, or close with uncertainty. Do not force a category or action when evidence is insufficient.
+    3. **Micro-Action Commitment:** If appropriate, offer one action and allow the user to decline. Record acceptance only when explicitly confirmed; do not exceed the message cap to obtain confirmation.
+  * **Three-message budget:** Opening/context question, optional clarification or action proposal, then concise close. The mock path clearly labels simulated readings. Do not infer emotional valence or control from biometrics alone.
 * **Highlander Pattern Adopted:** Action-oriented micro-steps; zero walls of text; anti-rumination circuit breaker.
 * **Ship / Acceptance Criteria:**
-  * [ ] Accurate classification into Distress, Eustress, Recovery Drain, or Clarifying follow-up.
-  * [ ] Prompt strictly adheres to concise delivery ($\le 3$ conversational turns total).
-  * [ ] Prescribes exactly 1 concrete action rather than an overwhelming list.
-  * [ ] Rumination prevention: conversations terminate gracefully without indefinite loops.
+  * [ ] Labeled dialogue fixtures cover Distress, Eustress, Cumulative Drain, and Uncertain/Mixed; expected labels follow explicit user context.
+  * [ ] Agent never exceeds 3 conversational turns.
+  * [ ] Offers at most one concrete action, honors refusal, and never logs unconfirmed commitment.
 
 ---
 
@@ -211,23 +228,21 @@ flowchart TD
     scripts/ledger.py add TRIGGER CAUSE INTERVENTION   # Records new check-in
     scripts/ledger.py verify --next-day                # Compares against subsequent night's HRV
     scripts/ledger.py report                           # Outputs recovery delta & stats
-    scripts/ledger.py reflect                          # Updates MEMORY.md with effective habits
+    scripts/ledger.py reflect                          # Summarizes tentative associations in runtime memory
     ```
-  * **Next-Day Verification:** Morning cron inspects subsequent night's HRV/sleep data:
-    * Did HRV rebound toward rolling mean (within $\mu \pm 1.0\sigma$)?
-    * Did sleep fragmentation decrease?
-    * Automatically expires stale unverified records older than 7 days (`EXPIRED_NO_DATA`).
-  * **Personal Model Adaptation & Memory Writeback:**
-    * Updates `MEMORY.md` under context rent with observed associations (requiring $N \ge 3$ trials before habit aggregation).
-    * Keeps runtime outcome data, populated memories, and state outside the tracked git checkout.
-    * Weekly 1-line trend recap.
-* **80/20 Leverage:** Provides empirical accountability—verifying that "help" translates into measurable physical recovery.
-* **Highlander Pattern Adopted:** Outcome ledger CLI; automated reflection; writeback to persistent memory under strict rent rule.
+  * Next-day morning cron compares HRV/sleep recovery:
+    * Did HRV rebound back within $\mu \pm 1.0\sigma$?
+    * Did sleep fragmentation resolve?
+  * **Outcome contract:** Store event/session ID, timestamps and timezone, real/mock provenance, source/metric definition, pre-intervention values and baseline, user-reported possible explanation, appraisal uncertainty, proposed action, explicit acceptance/completion status, subjective feedback, and follow-up readings with confounders. Personal values belong only in the external runtime store.
+  * **Follow-up matching:** Match the next local night's readings by date/source to the original event and its frozen pre-intervention baseline. Missing follow-up remains `pending`, then becomes `unavailable` after a configurable expiry (default: 48 hours); it is never counted as improvement. Re-running verification must not duplicate or overwrite observations incorrectly.
+  * **Interpretation:** A rebound is a later observation, not evidence that the action caused recovery. Report subjective usefulness separately from biometric change; distinguish proposed, accepted, and completed actions.
+  * **Memory Writeback:** Store tentative associations with observation count, date range, missing follow-ups, confounders, and uncertainty. Require at least five completed actions with matched follow-ups before aggregate habit summaries; this is a product reporting minimum, not statistical validation. Individual events remain observations, and summaries must not claim efficacy or comparative superiority.
+* **Highlander Pattern Adopted:** Outcome ledger CLI; automated reflection; writeback to persistent memory.
 * **Ship / Acceptance Criteria:**
   * [ ] `ledger.py` records and resolves entries without data loss.
   * [ ] Next-day verification accurately calculates biometric rebound delta.
-  * [ ] Verified insights write back to `MEMORY.md` under the strict rent rule.
-  * [ ] Agent provides weekly 1-line trend recap.
+  * [ ] Fixtures verify date/source matching, frozen baselines, missing follow-ups, idempotent writes, and separation of mock and real records.
+  * [ ] Memory summaries include counts and uncertainty, obey the minimum reporting rule, and contain no causal efficacy claims.
 
 ---
 
@@ -301,3 +316,7 @@ flowchart LR
   * Real-time sympathetic nervous system arousal detection via Electrodermal Activity (EDA) and skin temperature flux.
 * **Automated Direct Multi-Provider OAuth Sync:**
   * Native cloud sync daemons for Oura Ring, Whoop 4.0, Garmin Connect, and Apple HealthKit.
+
+## Runtime commands and delivery checks
+
+See [ONBOARDING.md](../ONBOARDING.md) for Telegram configuration, polling, and runtime paths. Credentials and recipient IDs stay in environment variables. A failed or interrupted send is journaled as delivery uncertain and must be inspected; it is never automatically resent. Reply IDs, sender identity, and reply-to message IDs protect session correlation. Mock mode requires explicit replies and never invents user context.
