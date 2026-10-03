@@ -90,11 +90,13 @@ class ChannelDispatcher:
         channel: str = "hermes_cli",
         spool_dir: Optional[Path] = None,
         reply_ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        recipient: Optional[str] = None,
     ):
         self.channel = channel
         self.spool_dir = spool_dir or Path(".runtime/messaging_spool")
         self.spool_dir.mkdir(parents=True, exist_ok=True)
         self.reply_ttl_seconds = reply_ttl_seconds
+        self.recipient = recipient or os.environ.get("USER_WHATSAPP_PHONE")
 
     def format_outbound_text(self, text: str, is_simulated: bool = False) -> str:
         """Label simulated alerts clearly so users distinguish tests from live biometrics."""
@@ -137,6 +139,19 @@ class ChannelDispatcher:
         tmp_file = session_file.with_suffix(".tmp")
         tmp_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
         tmp_file.replace(session_file)
+
+        # Dispatch live message over WhatsApp if channel is configured
+        if self.channel == "whatsapp" and self.recipient:
+            import subprocess
+            try:
+                subprocess.run(
+                    ["hermes", "send", "--to", f"whatsapp:{self.recipient}", formatted_text],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except Exception:
+                pass
 
         return event
 
