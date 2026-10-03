@@ -174,9 +174,28 @@ Run `matrix shell new --name auth` or launch a terminal tab from the Matrix OS w
 hermes model
 ```
 
-Pick your preferred model provider (e.g. Nous free tier, OpenRouter, Anthropic, or OpenAI).
-Alternatively, add your API key directly to `~/.hermes/.env`:
+Pick your preferred model provider (e.g. Google Gemini, Nous, OpenRouter, Anthropic, or OpenAI).
 
+For **Google Gemini** (including native TTS audio):
+```bash
+# 1. Add your Google API key to ~/.hermes/.env
+matrix run --project=main -C . -- bash -lc 'echo "GOOGLE_API_KEY=<KEY>" >> ~/.hermes/.env'
+
+# 2. Configure model inference to Gemini 3.8 Flash
+matrix run --project=main -C . -- bash -lc '
+hermes config set model.provider gemini
+hermes config set model.default gemini-3.8-flash
+'
+
+# 3. (Optional) Configure Gemini TTS for voice audio (Telegram/WhatsApp notes & TTS tool)
+matrix run --project=main -C . -- bash -lc '
+hermes config set tts.provider gemini
+hermes config set tts.gemini.model gemini-3.8-flash-tts
+hermes config set tts.gemini.voice Kore
+'
+```
+
+Alternatively, for OpenRouter or Anthropic:
 ```bash
 matrix run --project=main -C . -- bash -lc 'echo "OPENROUTER_API_KEY=<KEY>" >> ~/.hermes/.env'
 ```
