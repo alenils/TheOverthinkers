@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { INITIAL_DATA } from "./telemetryData";
 
 interface StatusData {
   timestamp: string;
@@ -74,26 +75,24 @@ interface StatusData {
 }
 
 export default function App() {
-  const [data, setData] = useState<StatusData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<StatusData>(INITIAL_DATA as StatusData);
+  const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "ledger" | "skills" | "commands">("overview");
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
 
   const fetchStatus = () => {
     setLoading(true);
-    fetch("./status.json?t=" + Date.now())
-      .then((res) => {
-        if (!res.ok) throw new Error("Could not load telemetry status");
-        return res.json();
-      })
-      .then((json: StatusData) => {
-        setData(json);
-        setError(null);
+    const url = (window.location.pathname.endsWith("/") ? window.location.pathname : window.location.pathname + "/") + "status.json?t=" + Date.now();
+    fetch(url, { credentials: "same-origin" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: StatusData | null) => {
+        if (json && json.model) {
+          setData(json);
+        }
         setLoading(false);
       })
-      .catch((err) => {
-        setError(err.message);
+      .catch(() => {
+        // Silently preserve bundled telemetry if iframe session restricts background fetch
         setLoading(false);
       });
   };
@@ -213,20 +212,6 @@ export default function App() {
           </button>
         ))}
       </div>
-
-      {error && (
-        <div style={{
-          padding: "12px 16px",
-          backgroundColor: "rgba(239, 68, 68, 0.1)",
-          border: "1px solid rgba(239, 68, 68, 0.3)",
-          borderRadius: "8px",
-          color: "#fca5a5",
-          fontSize: "13px",
-          marginBottom: "20px"
-        }}>
-          ⚠️ Telemetry sync note: {error}. Showing cached state.
-        </div>
-      )}
 
       {/* TAB 1: OVERVIEW */}
       {activeTab === "overview" && (
