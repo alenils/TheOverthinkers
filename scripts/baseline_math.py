@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Convenience CLI forwarder for skills/detect-baseline/scripts/baseline_math.py."""
+
+import importlib.util
+from pathlib import Path
+import sys
+
+SKILL_SCRIPT = Path(__file__).resolve().parent.parent / "skills" / "detect-baseline" / "scripts" / "baseline_math.py"
+
+spec = importlib.util.spec_from_file_location("detect_baseline_math", str(SKILL_SCRIPT))
+if spec is None or spec.loader is None:
+    raise ImportError(f"Could not load {SKILL_SCRIPT}")
+_mod = importlib.util.module_from_spec(spec)
+sys.modules["detect_baseline_math"] = _mod
+spec.loader.exec_module(_mod)
+
+# Export all symbols from detect_baseline_math into current module
+for name in dir(_mod):
+    if not name.startswith("__"):
+        globals()[name] = getattr(_mod, name)
+
+if __name__ == "__main__":
+    sys.exit(_mod.main())
