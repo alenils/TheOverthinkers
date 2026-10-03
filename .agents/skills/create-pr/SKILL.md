@@ -21,17 +21,19 @@ The full flow:
 
 ## Diff & Quality Gate Checks
 
-Before pushing, run the three mandatory repository gates:
+Before pushing, run the four mandatory repository gates:
 
 ```bash
 git diff --check origin/main..HEAD
 ./scripts/leak-scan.sh .
 python3 scripts/validate-skills.py .
+python3 -m unittest discover tests
 ```
 
 - **Diff check**: Catches whitespace errors, conflict markers, and blank lines at end of files.
 - **Leak gate**: Verifies zero personal vitals, zero secrets, zero private handles or paths.
 - **Skill validation**: Confirms YAML frontmatter, directory naming, and documentation integrity.
+- **Automated test suite**: Runs all 30 tests verifying Gates 0 through 3 end-to-end.
 
 **Advisory — peer review for skill changes**: if any changed file is under `skills/` or `.agents/skills/`, note it in the PR body. Skill definitions are self-contained and high-leverage — run `/peer-review` or recommend review before merge.
 
@@ -62,7 +64,7 @@ Fetch first — ensures `origin/main` is current before diff checks. Without thi
 
 ## Step 2: Run Pre-Push Quality Gates
 
-Run all three gates:
+Run all four gates:
 
 1. **Whitespace & conflict markers**:
    ```bash
@@ -75,6 +77,10 @@ Run all three gates:
 3. **Skill & doc integrity**:
    ```bash
    python3 scripts/validate-skills.py .
+   ```
+4. **Automated test suite (Gates 0–3)**:
+   ```bash
+   python3 -m unittest discover tests
    ```
 
 **On any failure**: stop immediately and report the error. Do not create or push a branch until all gates pass cleanly.
@@ -135,6 +141,7 @@ Run: `git diff origin/main..HEAD --name-only` and evaluate:
 - **Plan / Research changes**: any file under `Plan/` or `Research/` → `PLAN_CHANGED = true`
 - **Profile changes**: any file under `Profile/` → `PROFILE_CHANGED = true`
 - **Box changes**: any file under `Box/` → `BOX_CHANGED = true`
+- **Security changes**: any file touching `.gitleaks.toml`, `.leakignore`, or `scripts/leak-*` → `SECURITY_CHANGED = true`
 
 Determine which vertical gate is advanced (`Gate 0`, `Gate 1`, `Gate 2`, `Gate 3`, or `Foundations/Chore`).
 
@@ -160,8 +167,8 @@ Determine which vertical gate is advanced (`Gate 0`, `Gate 1`, `Gate 2`, `Gate 3
 
 <For each changed file, add one line summarizing key modifications:>
 
-- `skills/commit/SKILL.md` — structured conventional commits with leak-scan integration
-- `./scripts/simulate_trigger.py` — mock biometric trigger generator for Gate 0
+- `.agents/skills/commit/SKILL.md` — structured conventional commits with leak-scan integration
+- `scripts/simulate_trigger.py` — mock biometric trigger generator for Gate 0
 
 </details>
 
@@ -170,6 +177,7 @@ Determine which vertical gate is advanced (`Gate 0`, `Gate 1`, `Gate 2`, `Gate 3
 - **Diff check**: ✅ `git diff --check origin/main..HEAD` passed (no whitespace or conflict markers)
 - **Leak gate**: ✅ `./scripts/leak-scan.sh .` passed (zero personal vitals, zero secrets)
 - **Skill integrity**: ✅ `python3 scripts/validate-skills.py .` passed
+- **Unit tests**: ✅ `python3 -m unittest discover tests` passed (30/30 tests)
 - **Peer review**: ⏭ not flagged / ⚠️ skill files changed — peer review recommended
 
 ## Test Plan
