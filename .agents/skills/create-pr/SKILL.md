@@ -33,7 +33,7 @@ python3 scripts/validate-skills.py .
 - **Leak gate**: Verifies zero personal vitals, zero secrets, zero private handles or paths.
 - **Skill validation**: Confirms YAML frontmatter, directory naming, and documentation integrity.
 
-**Advisory — peer review for skill changes**: if any changed file is under `skills/` or `.claude/skills/`, note it in the PR body. Skill definitions are self-contained and high-leverage — run `/peer-review` or recommend review before merge.
+**Advisory — peer review for skill changes**: if any changed file is under `skills/` or `.agents/skills/`, note it in the PR body. Skill definitions are self-contained and high-leverage — run `/peer-review` or recommend review before merge.
 
 ---
 
@@ -131,7 +131,7 @@ If `git branch` fails because a local branch with that name already exists: `git
 ### Advisory Flags
 
 Run: `git diff origin/main..HEAD --name-only` and evaluate:
-- **Skill changes**: any file under `skills/` or `.claude/skills/` → `SKILLS_CHANGED = true`
+- **Skill changes**: any file under `skills/` or `.agents/skills/` → `SKILLS_CHANGED = true`
 - **Plan / Research changes**: any file under `Plan/` or `Research/` → `PLAN_CHANGED = true`
 - **Profile changes**: any file under `Profile/` → `PROFILE_CHANGED = true`
 - **Box changes**: any file under `Box/` → `BOX_CHANGED = true`

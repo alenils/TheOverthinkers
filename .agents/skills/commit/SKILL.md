@@ -159,7 +159,7 @@ Display these after the commit plan in Step 3. These never block a commit:
 
 | If changed files include... | Advisory Note |
 |---|---|
-| `skills/*/SKILL.md` or `.claude/skills/*/SKILL.md` | Recommend running `peer-review` on the skill changes |
+| `skills/*/SKILL.md` or `.agents/skills/*/SKILL.md` | Recommend running `peer-review` on the skill changes |
 | `Plan/PLAN.md` or `Research/*.md` | Verify gate DoD alignment against the 80/20 delivery plan |
 | `Profile/*.md` | Confirm the rent rule is respected and no raw personal vitals entered `MEMORY.md` |
 | `Box/` | Verify configuration matches Matrix box cookbook specifications |
