@@ -329,31 +329,16 @@ Matrix desktop:
      'cp /opt/matrix/app/shell/public/agent-logos/hermes-agent.png ~/system/icons/hermes.png'
    ```
 
-2. **Scaffold and build the Hermes app**:
+2. **Deploy and build The Overthinkers Control Center app**:
    ```bash
    matrix run --project=main -C . -- bash -lc '
-   cp -r ~/apps/_template-vite ~/apps/hermes
-   cat << "EOF" > ~/apps/hermes/matrix.json
-   {
-     "name": "Hermes Agent",
-     "slug": "hermes",
-     "description": "Hermes AI Stress Dialogue & Health Coach Agent",
-     "version": "1.0.0",
-     "category": "utilities",
-     "icon": "hermes",
-     "author": "Matrix OS",
-     "runtime": "vite",
-     "runtimeVersion": "^1.0.0",
-     "scope": "personal",
-     "listingTrust": "first_party",
-     "build": {
-       "install": "pnpm install --ignore-workspace --prefer-offline",
-       "command": "pnpm build",
-       "output": "dist",
-       "timeout": 120
-     }
-   }
-   EOF
+   # Copy the full app package shipped in this repository
+   cp -r ~/overthinkers/Box/Matrix/app ~/apps/hermes
+
+   # Generate live telemetry status from your configuration and ledger
+   python3 ~/overthinkers/scripts/generate_matrix_status.py
+
+   # Build production assets
    cd ~/apps/hermes && npm install && npm run build
    '
    ```

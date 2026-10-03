@@ -1,0 +1,19 @@
+{
+  "name": "Hermes Agent",
+  "slug": "hermes",
+  "description": "The Overthinkers AI Stress Dialogue & Health Coach Agent",
+  "version": "1.0.0",
+  "category": "utilities",
+  "icon": "hermes",
+  "author": "Matrix OS",
+  "runtime": "vite",
+  "runtimeVersion": "^1.0.0",
+  "scope": "personal",
+  "listingTrust": "first_party",
+  "build": {
+    "install": "pnpm install --ignore-workspace --prefer-offline",
+    "command": "pnpm build",
+    "output": "dist",
+    "timeout": 120
+  }
+}
