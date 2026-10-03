@@ -63,66 +63,113 @@ hermes -z "Reply with the single word: alive"
 
 ---
 
-## 4. Install Companion Wearable Skills (Optional)
+## 4. Install The Overthinkers Skills
 
-The Overthinkers loop connects physiological signals with subjective meaning. To ingest Garmin, Samsung Health, or Apple Health data, you can install companion skills from the `highlander-longevity-coach` repository:
+The Overthinkers loop connects physiological signals with subjective meaning through 6 core skills declared in `skills/`:
+- `detect-baseline`: 28-day rolling baseline ($\mu \pm 1.5\sigma$) slope break detection and athletic strain confounder filter.
+- `stress-dialogue`: Cognitive appraisal triage (Distress vs. Eustress vs. Recovery Drain) with $\le 3$ turn ceiling and 1 micro-action commitment.
+- `stress-ledger`: Closed-loop outcome ledger, next-day biometric rebound verification, and `MEMORY.md` reflection writeback.
+- `samsung-health-import`: Parser and SQLite normalizer for Samsung Health export archives.
+- `garmin-import`: Parser and SQLite normalizer for Garmin Connect exports.
+- `peer-review`: Multi-agent gut check and quality review runner.
+
+Install the skills into Hermes and restart the gateway:
 
 ```bash
+mkdir -p ~/.hermes/skills
+
+# Backup any existing skills in Hermes
+[ -d ~/.hermes/skills ] && cp -r ~/.hermes/skills ~/.hermes/skills.bak-$(date +%Y%m%d-%H%M%S)
+
+# Copy The Overthinkers skills into Hermes
+cp -r ~/overthinkers/skills/* ~/.hermes/skills/
+
+# (Optional) Install companion wearable skills from highlander-longevity-coach (e.g. Apple Health, Oura, Whoop):
 if [ ! -d ~/highlander-longevity-coach ]; then
-  git clone https://github.com/pridiuksson/highlander-longevity-coach.git ~/highlander-longevity-coach
+  git clone https://github.com/pridiuksson/highlander-longevity-coach.git ~/highlander-longevity-coach 2>/dev/null || true
+fi
+if [ -d ~/highlander-longevity-coach/skills ]; then
+  cp -r ~/highlander-longevity-coach/skills/* ~/.hermes/skills/ 2>/dev/null || true
 fi
 
-mkdir -p ~/.hermes/skills
-cp -r ~/highlander-longevity-coach/skills/* ~/.hermes/skills/ 2>/dev/null || true
+# Validate skills structural integrity
+python3 ~/overthinkers/scripts/validate-skills.py ~/overthinkers
 
+# Restart the gateway to load new skills
 hermes gateway restart
+hermes gateway status
 hermes skills list
 ```
 
 ---
 
-## 5. Configure Paths & Quiet Hours
+## 5. Install Profiles and Use One Runtime Home
 
-Configure Hermes to know where your biometric data and baselines reside:
-
-```bash
-hermes config set skills.config.health.health_dir   ~/health
-hermes config set skills.config.health.baseline_doc ~/health/baseline.md
-hermes config set skills.config.proactive.timezone  <TIMEZONE>
-hermes config set skills.config.proactive.quiet_hours "08:00-21:00"
-
-mkdir -p ~/health
-```
-
-*(Note: Warnings about unrecognized config keys can be safely ignored — Hermes persists them to `~/.hermes/config.yaml`).*
-
----
-
-## 6. Personal Context & Baseline
-
-Create your baseline file in `~/health/baseline.md` and define your personal parameters:
-
-- Known stress triggers (work context, sleep deficit, conflict styles)
-- Baseline resting HR and HRV ranges
-- Preferred communication tone (e.g. direct, grounding, compassionate)
-
----
-
-## 7. First Interactive Run
-
-Launch an interactive Hermes session:
+The installer, importer CLIs, orchestrator, and ledger share `HERMES_HOME`, falling back to `~/.hermes`. Repository `Profile/` files are generic templates. Runtime readings and populated memories stay outside the checkout.
 
 ```bash
-hermes
+python3 ~/overthinkers/scripts/install_runtime.py --dry-run
+python3 ~/overthinkers/scripts/install_runtime.py
+hermes skills list
 ```
 
-Run a test scenario to trigger the loop:
-> *"My wearable showed an HRV dip this morning and my resting HR is elevated. Let's do the stress dialogue loop."*
+The installer places `SOUL.md` at the runtime root, and `USER.md` plus `MEMORY.md` under `memories/`, matching Hermes 0.21.4. It preserves existing personalized files, migrates an older runtime `Profile/` scaffold if present, and backs up installed skills before replacing them. Review `SOUL.md` if an existing persona was preserved. Skill discovery and a human inspection of the loaded persona remain deployment acceptance checks.
 
-Observe the agent transition through the stages:
-1. **Detect**: Clarifying biometric anomaly vs workout or physiological confounders.
-2. **Ground**: Enforcing self-distanced 3rd-person framing.
-3. **Dialogue**: Initiating the two-chair dialogue.
-4. **Map**: Identifying active coping modes and underlying emotions.
-5. **Rescript**: Introducing the healthy adult intervention.
-6. **Track**: Logging resolution and emotional shift.
+Defaults are `data/health.db`, `data/garmin.db`, `data/ledger.db`, and `state/` inside that home. Set Hermes skill configuration paths to the same runtime data paths when using the skills directly. For a custom home, export `HERMES_HOME` for the installer, Hermes, imports, daily process, and reply worker; explicit command-line paths override these defaults.
+
+```bash
+export STRESS_TIMEZONE="<IANA_TIMEZONE>"
+export STRESS_ALLOWED_HOURS="08:00-21:00"
+```
+
+The Python runner reads these environment settings, not the Hermes `proactive` config keys. UTC is the fallback timezone. On Windows, a non-UTC IANA timezone requires the Python `tzdata` package.
+
+## 6. Test Explicit Mock Mode
+
+```bash
+python3 ~/overthinkers/scripts/simulate_trigger.py --interactive --ignore-quiet-hours
+python3 ~/overthinkers/scripts/orchestrator.py --interactive
+python3 ~/overthinkers/scripts/orchestrator.py --recap
+```
+
+Gate 0 uses repository profile templates to exercise a two-message mock dialogue; it does not prove Hermes loaded its runtime persona. Simulated alerts are labeled. Without an explicit mock reply or interactive input, sessions remain pending; EOF never creates invented user context. Gate 2 caps coach messages at three, including clarification and the proposal. Action acceptance requires a later reply; acceptance and reported completion are separate fields.
+
+The current runner uses deterministic appraisal rules. A separate `hermes` chat uses its configured model and persona; it does not automatically log that chat to this runner's ledger.
+
+## 7. Configure Telegram Delivery and Replies
+
+Create a Telegram bot and start a **private** conversation with it. Keep the bot token, intended chat ID, and intended user ID in a private environment file or secret manager outside the checkout. Export these variables to both the daily runner and reply worker:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_USER_ID`
+
+No credentials are needed for repository tests. The transport uses Telegram's [sendMessage and getUpdates API](https://core.telegram.org/bots/api). Polling requires no active webhook and **one poller per bot**. Replies must come from the configured user in the configured private chat, using Telegram's Reply function on the latest coach message; unrelated messages do not enter the session.
+
+```bash
+python3 ~/overthinkers/scripts/orchestrator.py --channel telegram
+python3 ~/overthinkers/scripts/orchestrator.py --poll
+# Or keep a supervised worker running to poll replies and expire unanswered sessions:
+python3 ~/overthinkers/scripts/orchestrator.py --watch
+```
+
+The daily command requires imported wearable data and enough same-source history. Unknown workout context suppresses proactive outreach. It sends at most one opening per local day, reserves that limit before HTTP, and journals every outbound attempt. A failed/interrupted send stays `DELIVERY_UNCERTAIN` and is never automatically retried. Inspect private `state/messaging/` records before taking manual recovery action. Missing replies expire silently after one hour; run the worker to apply expiration. A restart replays durable replies without duplicate coach messages or ledger entries.
+
+The closing proposal may ask for confirmation within the existing message budget. A later confirmation updates acceptance/completion without another coach message. Vague statements, silence, and unrelated replies cannot establish completion.
+
+## 8. Daily Operation and Follow-Up Checks
+
+Schedule the daily command with `--channel telegram` in your chosen scheduler, ensuring it and the reply worker receive the same runtime home, timezone, and Telegram environment. Keep the reply worker supervised. The deterministic runner does not require Hermes model credentials.
+
+Verification matches the next night's source and metric to the frozen trigger baseline. Missing follow-ups expire after 48 hours. Zero-variance baselines remain unverifiable. Old ledger schemas migrate additively; old records lacking provenance stay excluded from action summaries.
+
+Memory retains proposal counts, uncertainty, and excluded observations. Action summaries require at least five reported completed actions with real, matched follow-ups and verified context, grouped by source and metric. Biometric recovery is an observation, never proof the action caused it. Provider-specific units are kept separate; the current database has no within-provider device or measurement-version identifier, so use separate runtime data when changing those definitions.
+
+```bash
+python3 -B -m unittest discover -s tests -v
+python3 scripts/validate-skills.py .
+./scripts/leak-scan.sh .
+git diff --check
+```
+
+A live Telegram smoke test and Hermes profile discovery must still be checked on your configured cloud runtime.

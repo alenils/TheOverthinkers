@@ -6,18 +6,24 @@ It draws on the architectural patterns, skill layout, profile hierarchy, and qua
 
 The core thesis follows the **80/20 delivery principle**: prioritize possible contributing explanations, one micro-action, and recorded follow-up, while deferring complex clinical psychodynamics (IFS parts mapping, imagery rescripting, real-time rumination state machines) to **Future Plans**. The 80/20 framing is a scope heuristic, not a measured outcome claim.
 
-**Implementation status:** The profiles, skills, helpers, and tests below are planned deliverables. Existing repository validators do not establish that these components exist or work end to end.
+**Implementation status:** Profiles, six skills, import helpers, a Telegram transport, and regression tests now exist. The deterministic dialogue is not an LLM/Hermes inference bridge. Live messaging and profile discovery remain acceptance checks on the configured runtime; local tests alone do not establish them.
 
 ---
 
-## 1. Architectural Lineage from Highlander
+## 1. Guiding Principles & Scope Alignment
 
-The Overthinkers directly adopts the following core design invariants from Highlander:
+### 1.1 The 80/20 Rule: Behavioral Coaching over Clinical Therapy
+* **From `Diagram.md`:** Adopt the pragmatic cognitive appraisal framework (perceived control, challenge vs. threat, 4-way triage, and tactical micro-interventions). This provides immediate, high-utility support without clinical friction or risk of emotional spiraling.
+* **From `stress-dialogue-loop.md`:** Adopt the rigorous biometric mechanics (rolling baseline slope breaks, workout confounder exclusion, 3rd-person self-distanced entry, silence-by-default guardrails, and next-day outcome ledger verification).
+* **Deferred to Future:** Deep intra-psychic roleplaying (exile discovery, two-chair inner-critic battles, imagery rescripting). These are high-friction, error-prone over conversational messaging, and unnecessary for Phase 1 delivery.
+
+### 1.2 Architectural Lineage from Highlander
+The Overthinkers directly inherits the core design invariants from Highlander:
 
 1. **"Silence is free; speech is ledgered."**
    * The coach defaults to silence. Proactive outreach occurs at most **once per day**, strictly when an anomaly crosses threshold. Normal variance equals silence.
 2. **"Compare against the person's own baseline, never a population norm."**
-   * V1 uses directional deviations from a personal rolling baseline, never generic population averages. A z-score threshold is not a slope-break detector; trend detection is deferred.
+   * V1 uses directional deviations from a personal rolling baseline, never generic population averages. Level deviations and daily step-change deviations are separate heuristics. Neither establishes psychological stress.
 3. **The Evidence & Confounder Interlock:**
    * Check data quality and potential confounders before conversational triage. Elevated workout load is a possible physical explanation, not proof of cause. Absence of a workout explanation does not establish psychological stress.
 4. **Adversarial Restraint & Anti-Rumination Cap:**
@@ -29,7 +35,7 @@ The Overthinkers directly adopts the following core design invariants from Highl
 
 ---
 
-## 2. Profile Architecture (AI Mind vs. Human Biology vs. Memory)
+## 2. Profile Architecture (AI Mind vs. Human Context vs. Memory)
 
 Following the Highlander profile pattern, configuration is decoupled into three distinct tiers:
 
@@ -47,7 +53,8 @@ Governs communication posture, pushback intensity, and boundary rules:
 
 ### Tier 2: `USER.md` Scaffold (The Human's Context)
 Durable facts that pay context rent every turn:
-* Reference to biometric storage (`health.db` or baseline data source).
+* Reference to biometric storage (`health.db` or `garmin.db` from Samsung/Garmin imports).
+* Active wearable sources (`samsung`, `garmin`, or multi-device overlap).
 * Typical cognitive friction patterns (e.g., deadline paralysis, perfectionism, sleep delay).
 * Physical training profile (Zone 2, strength days, typical strain levels) to ensure accurate confounder filtering.
 * Notification channel & quiet hours window.
@@ -73,10 +80,24 @@ Skills live under `skills/<name>/SKILL.md` and comply with the Hermes skill vali
 
 ```text
 skills/
-├── detect-baseline/      # Stage 1: Ingest, rolling z-score, workout confounder filter
-├── stress-dialogue/      # Stage 2: 3rd-person check-in, cognitive appraisal, 1 micro-action
-└── stress-ledger/        # Stage 3: Outcome recording, next-day biometric closure, reflection
+├── samsung-health-import/  # Ingest: Samsung Health export zip watch folder & normalization
+├── garmin-import/          # Ingest: Garmin Connect account export zip (JSON + FIT parsing)
+├── detect-baseline/        # Stage 1: Rolling z-score engine & workout confounder filter
+├── stress-dialogue/        # Stage 2: 3rd-person check-in, cognitive appraisal, 1 micro-action
+└── stress-ledger/          # Stage 3: Outcome recording, next-day biometric closure, reflection
 ```
+
+### Wearable Ingestion Skills (Adopted from Highlander)
+* **`samsung-health-import`**:
+  * Watches `health.health_dir/samsung-exports/` for Samsung Health export zips (`*samsung*health*.zip`).
+  * Normalizes nightly sleep stages, autonomic stress scores, heart rate samples, and workout logs into `$HERMES_HOME/data/health.db`.
+* **`garmin-import`**:
+  * Watches `health.health_dir/garmin-exports/` for Garmin Connect account-export zips (`garmin_connect_export.zip`).
+  * Parses JSON legs (sleep, daily HRV, stress, resting HR) and FIT session legs (ground-truth workout strain, duration, intensity) into `$HERMES_HOME/data/garmin.db`.
+* **Cross-Source Normalization**:
+  * Unified query layer that extracts the two critical signals regardless of device source:
+    1. **Autonomic marker**: Nightly HRV (RMSSD/SDNN) and sleep fragmentation.
+    2. **Confounder marker**: Yesterday's workout strain, active duration, and training load.
 
 ### Frontmatter Contract
 Every skill declares its dependencies, execution platforms, and configurable parameters:
@@ -112,7 +133,7 @@ Each gate is a self-contained, testable vertical slice delivering end-to-end fun
 ```mermaid
 flowchart TD
     G0["Gate 0: Steel Thread & Profile Bootstrap<br/>(Mock Trigger → Observer Check-In ≤ 2 turns)"]
-    G1["Gate 1: Baseline & Confounder Engine<br/>(Rolling z-score + Workout Filter in detect-baseline)"]
+    G1["Gate 1: Ingest, Baseline & Confounders<br/>(Samsung/Garmin Import + Rolling z-score + Workout Filter)"]
     G2["Gate 2: Cognitive Appraisal & Action Triage<br/>(Distress vs Eustress vs Drain in stress-dialogue)"]
     G3["Gate 3: Closed-Loop Outcome Ledger<br/>(Next-day HRV verification in stress-ledger)"]
 
@@ -134,7 +155,7 @@ flowchart TD
     > *"Demo check-in using simulated data. Looking at your day from the outside, what's taking up your bandwidth?"*
   * User reply capture, concise acknowledgment, and immediate session termination ($\le 2$ turns).
   * **Turn contract:** One turn means one outbound agent message, including the close. Gate 0 sends the opening and, if the user replies, one acknowledgment. Retries and multipart sends must not bypass the message budget.
-  * **No reply:** Expire the session after a configurable timeout (default: 24 hours), without a reminder. Late replies must not reopen the expired automated session.
+  * **No reply:** Expire the session after a configurable timeout (default: 1 hour), without a reminder. Late replies must not reopen the expired automated session.
 * **Highlander Pattern Adopted:** Strict anti-verbosity ceiling; single-question intake; conversation hard-stop.
 * **Ship / Acceptance Criteria:**
   * [ ] Mock trigger sends one labeled check-in through Telegram; the intended user's reply is captured and logged.
@@ -147,25 +168,25 @@ flowchart TD
 
 ---
 
-### Gate 1: Rolling Baseline & Confounder Engine (`skills/detect-baseline`)
-> **Goal:** Detect authentic autonomic anomalies while filtering out athletic exertion and respecting silence-by-default.
+### Gate 1: Ingest, Rolling Baseline & Confounder Engine (`detect-baseline`, `samsung/garmin-import`)
+> **Goal:** Ingest real Samsung / Garmin wearable data, compute individual rolling baselines, and filter out athletic fatigue.
 
 * **What Ships:**
   * `skills/detect-baseline/SKILL.md` + calculation helper `scripts/baseline_math.py`.
   * **Rolling Baseline Engine (initial testable heuristic):** For each metric, use up to 28 calendar days preceding the candidate night, excluding that night. Require at least 14 valid nightly readings from the same source and measurement definition. Compute sample mean and sample standard deviation, then `z = (candidate - mean) / standard_deviation`.
-    * Flag low HRV at `z <= -1.5`, high resting HR at `z >= 1.5`, and high sleep fragmentation at `z >= 1.5`. One eligible flagged metric creates one candidate event; simultaneous flags are bundled.
+    * Flag low HRV at `z <= -1.5`, high sleep fragmentation at `z >= 1.5`. One eligible flagged metric creates one candidate event; simultaneous flags are bundled.
     * Missing or invalid candidate data, insufficient history, or zero baseline variance make that metric ineligible. Do not impute zeros or mix devices/units. If all metrics are ineligible, return `insufficient_data` and stay silent.
-    * Thresholds are configurable starting hypotheses to evaluate with fixtures and pilot observations, not validated psychological-stress cutoffs. Slope-break detection is out of scope for v1.
+    * Thresholds are configurable starting hypotheses to evaluate with fixtures and pilot observations, not validated psychological-stress cutoffs. The helper also checks the candidate daily delta against historical daily deltas only with consecutive, same-source history and nonzero delta variance. This is a step-change heuristic, not fitted trend segmentation.
   * **Workout Confounder Filter:** Cross-checks previous day's athletic load / strain.
-    * Compare a single provider's daily load against its preceding 28-day load baseline, requiring 14 valid days. Initially treat load above `mean + 1.5 * sample_standard_deviation` as elevated; this is also a configurable heuristic.
+    * Compare a single provider's daily load against its preceding 28-day load baseline, requiring 14 valid days. Treat load at the configured absolute threshold or above `mean + 1.5 * sample_standard_deviation` as elevated. The absolute threshold is a fallback when strain history has no variance; neither rule proves causation.
     * If load is elevated, record `possible_physical_recovery`, suppress the automated psychological check-in, and avoid asserting a confirmed cause.
-    * If load/history is unavailable or variance is zero, record `confounder_unknown` and stay silent for proactive v1; user-initiated dialogue remains available.
+    * If prior load or its same-source history is unavailable, record `WORKOUT_DATA_MISSING_UNVERIFIED` or `WORKOUT_HISTORY_UNVERIFIED` and stay silent for proactive v1; user-initiated dialogue remains available.
     * Otherwise dispatch a neutral anomaly check-in to Gate 2 with source, flags, and uncertainty. Do not label the user psychologically stressed from readings alone.
   * **Silence Default:** Maximum 1 check-in per day; zero alerts if metrics are within normal variance.
   * Enforce the daily limit durably using the configured IANA timezone and allowed notification hours, including after process restarts.
 * **Highlander Pattern Adopted:** "Compare against own baseline, never population norm"; adversarial evidence filter.
 * **Ship / Acceptance Criteria:**
-  * [ ] Unit tests pass over 28-day synthetic biometric fixtures (`tests/test_baseline.py`).
+  * [ ] Unit tests pass over 28-day synthetic biometric fixtures (`tests/test_gate1_baseline.py`).
   * [ ] Fixtures cover both deviation directions, threshold boundaries, exclusion of the candidate night, missing readings, short history, zero variance, and multiple simultaneous flags.
   * [ ] Workout strain fixture suppresses the psychological check-in cleanly.
   * [ ] Unknown workout load/history produces an explicit uncertain state and no proactive ping.
@@ -200,6 +221,8 @@ flowchart TD
 > **Goal:** Close the empirical loop by recording interventions and evaluating next-day biometric recovery.
 
 * **What Ships:**
+  * **Outcome Ledger:** Local SQLite / JSON store recording:
+    `{ date, trigger_metric, deviation_sigma, attributed_cause, intervention_type, subjective_rating, next_day_rebound_delta }`
   * `skills/stress-ledger/SKILL.md` + `scripts/ledger.py` (adopting Highlander's `proactive-coach/scripts/ledger.py` CLI pattern):
     ```bash
     scripts/ledger.py add TRIGGER CAUSE INTERVENTION   # Records new check-in
@@ -293,3 +316,7 @@ flowchart LR
   * Real-time sympathetic nervous system arousal detection via Electrodermal Activity (EDA) and skin temperature flux.
 * **Automated Direct Multi-Provider OAuth Sync:**
   * Native cloud sync daemons for Oura Ring, Whoop 4.0, Garmin Connect, and Apple HealthKit.
+
+## Runtime commands and delivery checks
+
+See [ONBOARDING.md](../ONBOARDING.md) for Telegram configuration, polling, and runtime paths. Credentials and recipient IDs stay in environment variables. A failed or interrupted send is journaled as delivery uncertain and must be inspected; it is never automatically resent. Reply IDs, sender identity, and reply-to message IDs protect session correlation. Mock mode requires explicit replies and never invents user context.
