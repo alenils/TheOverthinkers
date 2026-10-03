@@ -221,6 +221,69 @@ class TestGate1Baseline(unittest.TestCase):
         self.assertFalse(eval_res["dispatch_trigger"])
         self.assertIn("athletic load", eval_res["message"].lower())
 
+    def test_zero_variance_history_rejected(self):
+        conn = import_samsung.init_db(self.db_path)
+        base_date = datetime(2026, 7, 1)
+
+        with conn:
+            for day in range(20):
+                d_str = (base_date + timedelta(days=day)).strftime("%Y-%m-%d")
+                # Exactly identical flatline
+                conn.execute(
+                    "INSERT INTO daily_metrics (date, hrv_score, resting_hr, sleep_fragmentation, workout_strain_score, source) "
+                    "VALUES (?, 55.0, 60.0, 0.10, 4.0, 'samsung')",
+                    (d_str,),
+                )
+            target_str = (base_date + timedelta(days=20)).strftime("%Y-%m-%d")
+            conn.execute(
+                "INSERT INTO daily_metrics (date, hrv_score, resting_hr, sleep_fragmentation, workout_strain_score, source) "
+                "VALUES (?, 40.0, 65.0, 0.25, 4.0, 'samsung')",
+                (target_str,),
+            )
+        conn.close()
+
+        target_rec, prior_rec, history = baseline_math.load_series_from_db(self.db_path, target_str, window_days=28)
+        eval_res = baseline_math.evaluate_day_metrics(
+            target_rec=target_rec,
+            prior_rec=prior_rec,
+            history_recs=history,
+            min_history_days=14,
+        )
+        self.assertEqual(eval_res["status"], "ZERO_VARIANCE_INSUFFICIENT_DATA")
+        self.assertFalse(eval_res["dispatch_trigger"])
+
+    def test_missing_workout_strain_unverified(self):
+        conn = import_samsung.init_db(self.db_path)
+        base_date = datetime(2026, 6, 1)
+
+        with conn:
+            for day in range(20):
+                d_str = (base_date + timedelta(days=day)).strftime("%Y-%m-%d")
+                conn.execute(
+                    "INSERT INTO daily_metrics (date, hrv_score, resting_hr, sleep_fragmentation, source) "
+                    "VALUES (?, ?, 60.0, 0.10, 'samsung')",
+                    (d_str, 58.0 + (day % 3) - 1.0),
+                )
+            target_str = (base_date + timedelta(days=20)).strftime("%Y-%m-%d")
+            # Target day has dip, but prior day had NULL workout strain
+            conn.execute(
+                "INSERT INTO daily_metrics (date, hrv_score, resting_hr, sleep_fragmentation, source) "
+                "VALUES (?, 40.0, 66.0, 0.25, 'samsung')",
+                (target_str,),
+            )
+        conn.close()
+
+        target_rec, prior_rec, history = baseline_math.load_series_from_db(self.db_path, target_str, window_days=28)
+        eval_res = baseline_math.evaluate_day_metrics(
+            target_rec=target_rec,
+            prior_rec=prior_rec,
+            history_recs=history,
+            min_history_days=14,
+        )
+        # Must not crash, and must report unverified missing workout data
+        self.assertEqual(eval_res["status"], "AUTONOMIC_ANOMALY")
+        self.assertEqual(eval_res["confounder_status"], "WORKOUT_DATA_MISSING_UNVERIFIED")
+
 
 if __name__ == "__main__":
     unittest.main()

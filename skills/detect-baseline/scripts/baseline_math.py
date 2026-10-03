@@ -3,7 +3,8 @@
 
 Detects individual slope breaks (mu +- 1.5 sigma) on nightly autonomic tone
 and sleep fragmentation, suppressing mental stress check-ins when prior-day
-athletic workout strain explains the physiological dip.
+athletic workout strain explains the physiological dip, and returning explicit
+insufficient-data states when baseline variance is zero or workout data is missing.
 """
 
 from __future__ import annotations
@@ -32,11 +33,9 @@ def compute_mean_and_std(values: List[float]) -> Tuple[float, float]:
 
 
 def compute_z_score(val: float, mean: float, std: float) -> float:
-    """Calculate z-score; handle zero/near-zero standard deviation gracefully."""
-    if std <= 1e-6:
-        if abs(val - mean) < 1e-6:
-            return 0.0
-        return -999.0 if val < mean else 999.0
+    """Calculate z-score; return 0.0 if standard deviation has zero/near-zero variance."""
+    if std <= 1e-4:
+        return 0.0
     return (val - mean) / std
 
 
@@ -45,49 +44,84 @@ def check_slope_break(
     history: List[float],
     metric_name: str,
     threshold_sigma: float = 1.5,
-) -> Tuple[bool, float, float, float]:
+    prior_val: Optional[float] = None,
+) -> Tuple[bool, float, float, float, Optional[float]]:
     """Check whether current_val represents an anomalous slope break.
 
-    For HRV (higher is better): anomaly is a DROP (z <= -threshold_sigma).
-    For sleep_fragmentation (lower is better): anomaly is a SPIKE (z >= +threshold_sigma).
+    Calculates:
+      1. Level z-score against historical baseline mean & std.
+      2. Trajectory slope break (step-change discontinuity vs historical daily deltas).
     """
     mean, std = compute_mean_and_std(history)
+    if std <= 1e-4:
+        return False, 0.0, mean, std, None
+
     z = compute_z_score(current_val, mean, std)
 
-    if metric_name == "hrv_score":
-        is_break = z <= -threshold_sigma
-    elif metric_name == "sleep_fragmentation":
-        is_break = z >= threshold_sigma
-    else:
-        is_break = abs(z) >= threshold_sigma
+    # Compute rate-of-change delta slope if prior value exists
+    slope_delta = None
+    is_slope_anomaly = False
+    if prior_val is not None:
+        daily_deltas = [history[i] - history[i - 1] for i in range(1, len(history))]
+        if daily_deltas:
+            mean_delta, std_delta = compute_mean_and_std(daily_deltas)
+            if std_delta > 1e-4:
+                current_delta = current_val - prior_val
+                z_delta = compute_z_score(current_delta, mean_delta, std_delta)
+                slope_delta = z_delta
+                if metric_name == "hrv_score" and z_delta <= -threshold_sigma:
+                    is_slope_anomaly = True
+                elif metric_name == "sleep_fragmentation" and z_delta >= threshold_sigma:
+                    is_slope_anomaly = True
 
-    return is_break, z, mean, std
+    if metric_name == "hrv_score":
+        is_level_break = z <= -threshold_sigma
+    elif metric_name == "sleep_fragmentation":
+        is_level_break = z >= threshold_sigma
+    else:
+        is_level_break = abs(z) >= threshold_sigma
+
+    is_break = is_level_break or is_slope_anomaly
+    return is_break, z, mean, std, slope_delta
 
 
 def evaluate_workout_confounder(
-    prior_strain: float,
+    prior_strain: Optional[float],
     historical_strains: List[float],
     absolute_threshold: float = 14.0,
     strain_sigma_threshold: float = 1.5,
-) -> Tuple[bool, str]:
+) -> Tuple[str, str]:
     """Determine whether prior day's workout strain explains the physiological dip.
 
-    historical_strains must strictly precede prior day (no self-normalization).
+    Returns:
+      (status, reason_message)
+      status: "CONFOUNDED_STRAIN" | "NO_CONFOUNDER_DETECTED" | "WORKOUT_DATA_MISSING_UNVERIFIED"
     """
+    if prior_strain is None:
+        return (
+            "WORKOUT_DATA_MISSING_UNVERIFIED",
+            "No prior-day workout records available; athletic exertion cannot be verified or ruled out.",
+        )
+
     if prior_strain >= absolute_threshold:
-        return True, f"Absolute strain score {prior_strain:.1f} >= {absolute_threshold:.1f}"
+        return (
+            "CONFOUNDED_STRAIN",
+            f"Absolute workout strain score {prior_strain:.1f} >= threshold {absolute_threshold:.1f}",
+        )
 
     if historical_strains:
         mean_strain, std_strain = compute_mean_and_std(historical_strains)
-        if std_strain > 1e-6:
-            z_strain = (prior_strain - mean_strain) / std_strain
-            if z_strain >= strain_sigma_threshold:
-                return (
-                    True,
-                    f"Strain relative jump z={z_strain:.2f} >= {strain_sigma_threshold:.1f} sigma above baseline",
-                )
+        z_strain = compute_z_score(prior_strain, mean_strain, std_strain)
+        if z_strain is not None and z_strain >= strain_sigma_threshold:
+            return (
+                "CONFOUNDED_STRAIN",
+                f"Workout strain jump z={z_strain:.2f} >= {strain_sigma_threshold:.1f} sigma above training baseline",
+            )
 
-    return False, "No significant prior athletic strain detected"
+    return (
+        "NO_CONFOUNDER_DETECTED",
+        f"Prior day athletic strain ({prior_strain:.1f}) within normal training variance.",
+    )
 
 
 def load_series_from_db(
@@ -104,7 +138,7 @@ def load_unified_series(
     target_date: str,
     window_days: int = 28,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Unified query layer: loads and merges records across multiple wearable DBs."""
+    """Unified query layer: loads and merges records across multiple wearable DBs while tracking source provenance."""
     dt_target = datetime.strptime(target_date, "%Y-%m-%d")
     dt_prior = dt_target - timedelta(days=1)
     prior_date = dt_prior.strftime("%Y-%m-%d")
@@ -141,19 +175,27 @@ def load_unified_series(
                 "sleep_fragmentation": None,
                 "workout_strain_score": None,
                 "sources": [],
+                "metric_sources": {},
             })
-            if r["hrv_score"] is not None and cur["hrv_score"] is None:
-                cur["hrv_score"] = float(r["hrv_score"])
-            if r["resting_hr"] is not None and cur["resting_hr"] is None:
-                cur["resting_hr"] = float(r["resting_hr"])
-            if r["sleep_fragmentation"] is not None and cur["sleep_fragmentation"] is None:
-                cur["sleep_fragmentation"] = float(r["sleep_fragmentation"])
-            if r["workout_strain_score"] is not None:
-                existing_strain = cur["workout_strain_score"] or 0.0
-                cur["workout_strain_score"] = max(existing_strain, float(r["workout_strain_score"]))
             src = r["source"] or "wearable"
             if src not in cur["sources"]:
                 cur["sources"].append(src)
+
+            if r["hrv_score"] is not None and cur["hrv_score"] is None:
+                cur["hrv_score"] = float(r["hrv_score"])
+                cur["metric_sources"]["hrv_score"] = src
+            if r["resting_hr"] is not None and cur["resting_hr"] is None:
+                cur["resting_hr"] = float(r["resting_hr"])
+                cur["metric_sources"]["resting_hr"] = src
+            if r["sleep_fragmentation"] is not None and cur["sleep_fragmentation"] is None:
+                cur["sleep_fragmentation"] = float(r["sleep_fragmentation"])
+                cur["metric_sources"]["sleep_fragmentation"] = src
+            if r["workout_strain_score"] is not None:
+                existing_strain = cur["workout_strain_score"] or 0.0
+                val = float(r["workout_strain_score"])
+                if val >= existing_strain:
+                    cur["workout_strain_score"] = val
+                    cur["metric_sources"]["workout_strain_score"] = src
 
     target_rec = merged_by_date.get(target_date)
     prior_rec = merged_by_date.get(prior_date)
@@ -184,7 +226,7 @@ def evaluate_day_metrics(
     workout_strain_threshold: float = 14.0,
     min_history_days: int = 14,
 ) -> Dict[str, Any]:
-    """Run rolling baseline evaluation and workout confounder interlock."""
+    """Run rolling baseline evaluation and workout confounder interlock with explicit data-quality guards."""
     target_date = target_rec["date"]
 
     # Filter history records having valid autonomic values
@@ -203,6 +245,17 @@ def evaluate_day_metrics(
             "dispatch_trigger": False,
         }
 
+    # Check if baseline completely lacks variance across all metrics
+    _, hrv_std_check = compute_mean_and_std(valid_hrv_history) if valid_hrv_history else (0.0, 0.0)
+    _, frag_std_check = compute_mean_and_std(valid_frag_history) if valid_frag_history else (0.0, 0.0)
+    if hrv_std_check <= 1e-4 and frag_std_check <= 1e-4:
+        return {
+            "date": target_date,
+            "status": "ZERO_VARIANCE_INSUFFICIENT_DATA",
+            "message": "Baseline history lacks physiological variance (std <= 1e-4); cannot compute slope break.",
+            "dispatch_trigger": False,
+        }
+
     # Background training strain history strictly precedes prior day (no self-normalization)
     prior_date_str = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     background_strain_history = [
@@ -213,20 +266,28 @@ def evaluate_day_metrics(
 
     current_hrv = target_rec.get("hrv_score")
     current_frag = target_rec.get("sleep_fragmentation")
-    prior_strain = float(prior_rec.get("workout_strain_score", 0.0)) if prior_rec else 0.0
+
+    # Safely extract prior day strain without crashing on None
+    prior_strain: Optional[float] = None
+    if prior_rec and prior_rec.get("workout_strain_score") is not None:
+        prior_strain = float(prior_rec["workout_strain_score"])
+
+    # Extract prior day hrv/frag for slope delta calculation
+    prior_hrv = float(prior_rec["hrv_score"]) if (prior_rec and prior_rec.get("hrv_score") is not None) else None
+    prior_frag = float(prior_rec["sleep_fragmentation"]) if (prior_rec and prior_rec.get("sleep_fragmentation") is not None) else None
 
     hrv_break = False
-    hrv_z, hrv_mean, hrv_std = 0.0, 0.0, 0.0
+    hrv_z, hrv_mean, hrv_std, hrv_slope_z = 0.0, 0.0, 0.0, None
     if current_hrv is not None and len(valid_hrv_history) >= min_history_days:
-        hrv_break, hrv_z, hrv_mean, hrv_std = check_slope_break(
-            float(current_hrv), valid_hrv_history, "hrv_score", anomaly_sigma
+        hrv_break, hrv_z, hrv_mean, hrv_std, hrv_slope_z = check_slope_break(
+            float(current_hrv), valid_hrv_history, "hrv_score", anomaly_sigma, prior_val=prior_hrv
         )
 
     frag_break = False
-    frag_z, frag_mean, frag_std = 0.0, 0.0, 0.0
+    frag_z, frag_mean, frag_std, frag_slope_z = 0.0, 0.0, 0.0, None
     if current_frag is not None and len(valid_frag_history) >= min_history_days:
-        frag_break, frag_z, frag_mean, frag_std = check_slope_break(
-            float(current_frag), valid_frag_history, "sleep_fragmentation", anomaly_sigma
+        frag_break, frag_z, frag_mean, frag_std, frag_slope_z = check_slope_break(
+            float(current_frag), valid_frag_history, "sleep_fragmentation", anomaly_sigma, prior_val=prior_frag
         )
 
     is_anomaly = hrv_break or frag_break
@@ -234,7 +295,7 @@ def evaluate_day_metrics(
     deviation_val = hrv_z if hrv_break else (frag_z if frag_break else 0.0)
 
     # Confounder check
-    is_confounded, confounder_reason = evaluate_workout_confounder(
+    confounder_status, confounder_reason = evaluate_workout_confounder(
         prior_strain, background_strain_history, workout_strain_threshold, anomaly_sigma
     )
 
@@ -248,7 +309,7 @@ def evaluate_day_metrics(
             "message": "Metrics within personal rolling baseline variance. Silence.",
         }
 
-    if is_confounded:
+    if confounder_status == "CONFOUNDED_STRAIN":
         return {
             "date": target_date,
             "status": "PHYSICAL_RECOVERY_STRAIN",
@@ -256,8 +317,26 @@ def evaluate_day_metrics(
             "suppressed_metric": triggered_metric,
             "deviation_sigma": round(deviation_val, 2),
             "prior_workout_strain": prior_strain,
+            "confounder_status": confounder_status,
             "confounder_reason": confounder_reason,
             "message": f"Autonomic dip on {triggered_metric} explained by athletic load. Suppressed mental stress check-in. Silence.",
+        }
+
+    if confounder_status == "WORKOUT_DATA_MISSING_UNVERIFIED":
+        # Dispatches with unverified confounder warning so downstream coach and ledger are aware
+        return {
+            "date": target_date,
+            "status": "AUTONOMIC_ANOMALY",
+            "dispatch_trigger": True,
+            "triggered_metric": triggered_metric,
+            "deviation_sigma": round(deviation_val, 2),
+            "hrv": {"value": current_hrv, "mean": round(hrv_mean, 2), "z_score": round(hrv_z, 2)},
+            "sleep_fragmentation": {"value": current_frag, "mean": round(frag_mean, 2), "z_score": round(frag_z, 2)},
+            "prior_workout_strain": None,
+            "confounder_status": "WORKOUT_DATA_MISSING_UNVERIFIED",
+            "confounder_reason": confounder_reason,
+            "metric_sources": target_rec.get("metric_sources", {}),
+            "message": f"Slope break confirmed on {triggered_metric} (z={deviation_val:.2f}), but prior workout records are missing.",
         }
 
     # Authentic unconfounded psychological / autonomic anomaly
@@ -270,6 +349,9 @@ def evaluate_day_metrics(
         "hrv": {"value": current_hrv, "mean": round(hrv_mean, 2), "z_score": round(hrv_z, 2)},
         "sleep_fragmentation": {"value": current_frag, "mean": round(frag_mean, 2), "z_score": round(frag_z, 2)},
         "prior_workout_strain": prior_strain,
+        "confounder_status": "NO_CONFOUNDER_DETECTED",
+        "confounder_reason": confounder_reason,
+        "metric_sources": target_rec.get("metric_sources", {}),
         "message": f"Slope break confirmed on {triggered_metric} (z={deviation_val:.2f}). Ready for cognitive appraisal.",
     }
 

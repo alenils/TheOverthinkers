@@ -223,7 +223,7 @@ class TestGate3Ledger(unittest.TestCase):
         ledger.reflect_to_memory(self.ledger_db, self.memory_file)
         updated = self.memory_file.read_text(encoding="utf-8")
 
-        self.assertIn("## Intervention Efficacy Ledger (Verified Biometric Correlations)", updated)
+        self.assertIn("## Intervention Follow-Up Ledger", updated)
         self.assertIn("Physiological Sigh (3 cycles)", updated)
         # Dividers and standing rules MUST be preserved!
         self.assertIn("---\n\n## Standing Rules & Interaction Preferences", updated)
@@ -294,6 +294,22 @@ class TestGate3Ledger(unittest.TestCase):
         # Weekly recap
         recap = ledger.generate_weekly_recap(self.ledger_db)
         self.assertIn("Weekly Recap:", recap)
+
+    def test_runtime_installer(self):
+        import install_runtime
+        inst_dir = Path(self.temp_dir) / "test_hermes_runtime"
+        report = install_runtime.install_runtime(inst_dir)
+        self.assertTrue((inst_dir / "skills").is_dir())
+        self.assertTrue((inst_dir / "Profile" / "SOUL.md").is_file())
+        self.assertTrue((inst_dir / "data").is_dir())
+        self.assertTrue((inst_dir / "state").is_dir())
+
+        # Second install preserves personalized files
+        user_file = inst_dir / "Profile" / "USER.md"
+        user_file.write_text("CUSTOM_USER_DATA", encoding="utf-8")
+        report2 = install_runtime.install_runtime(inst_dir)
+        self.assertIn("USER.md", report2["preserved_profiles"])
+        self.assertEqual(user_file.read_text(encoding="utf-8"), "CUSTOM_USER_DATA")
 
 
 if __name__ == "__main__":

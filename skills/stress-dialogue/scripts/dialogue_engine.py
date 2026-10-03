@@ -2,7 +2,7 @@
 """Cognitive appraisal triage and stress dialogue state machine.
 
 Implements the 4-way appraisal matrix (Eustress, Distress, Recovery Drain, Uncertain),
-strictly caps conversational turns (<= 3 turns), enforces the anti-rumination
+strictly caps conversational turns (<= max_turns), enforces the anti-rumination
 circuit breaker, and locks in exactly 1 actionable micro-intervention with canonical IDs.
 """
 
@@ -72,26 +72,45 @@ def detect_rumination(text: str) -> bool:
     return False
 
 
+def detect_action_acceptance(user_text: str) -> Optional[bool]:
+    """Detect whether user accepted, rejected, or did not report on micro-action."""
+    lower = user_text.lower().strip()
+    accept_markers = ["ok", "will do", "sounds good", "yes", "i'll do that", "got it", "sure", "done", "agree", "trying it"]
+    reject_markers = ["no", "can't do that", "won't work", "useless", "impossible", "not doing that"]
+
+    if any(m in lower for m in accept_markers):
+        return True
+    if any(m in lower for m in reject_markers):
+        return False
+    return None
+
+
 def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
-    """Classify user text into the 4-way appraisal matrix with robust threat precedence.
+    """Classify user text into the 4-way appraisal matrix with robust threat and control precedence.
 
     Returns:
-        (category, cause_id, intervention_id, attributed_cause)
+        (category, cause_id, intervention_id, possible_explanation)
     """
     lower = user_text.lower().strip()
 
-    # 1. Check Distress / Threat FIRST to avoid swallowing threat language under work keywords
-    distress_markers = [
+    # 1. Low Perceived Control / Threat Markers
+    # Must precede Eustress: e.g. "My deadline is impossible and I have no control" is strictly DISTRESS!
+    low_control_markers = [
+        "no control", "out of my control", "out of control", "zero control",
+        "impossible", "can't handle", "cannot handle", "uncontrollable",
+        "overwhelmed", "helpless", "trapped", "powerless", "drowning",
+    ]
+    acute_threat_markers = [
         "argument", "fight", "conflict", "yelled", "fired", "layoff", "laid off",
         "panic", "anxious", "anxiety", "scared", "worried", "crisis", "boss yelled",
-        "threatening", "threatened", "trapped", "terrified", "dread",
+        "threatening", "threatened", "terrified", "dread",
     ]
-    if any(m in lower for m in distress_markers):
+    if any(m in lower for m in low_control_markers) or any(m in lower for m in acute_threat_markers):
         return (
             "DISTRESS",
             "ACUTE_THREAT",
             "PHYSIOLOGICAL_SIGH",
-            "Acute threat or low-control friction",
+            "Possible explanation: acute threat or perceived low control",
         )
 
     # 2. Recovery Drain (poor recovery, chronic sleep deficit, physical exhaustion)
@@ -104,7 +123,7 @@ def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
             "RECOVERY_DRAIN",
             "RECOVERY_DEFICIT",
             "SCREEN_CURFEW",
-            "Cumulative recovery deficit and fatigue",
+            "Possible explanation: cumulative recovery deficit and fatigue",
         )
 
     # 3. Eustress (High control / challenge orientation / proactive load)
@@ -118,7 +137,7 @@ def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
             "EUSTRESS",
             "CHALLENGE_LOAD",
             "PRIORITY_LOCK",
-            "High-demand challenge milestone",
+            "Possible explanation: high-demand challenge milestone with perceived control",
         )
 
     # 4. Uncertain / Ambiguous
@@ -128,7 +147,7 @@ def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
             "UNCERTAIN",
             "AMBIGUOUS_FRICTION",
             "GROUNDING_PAUSE",
-            "Ambiguous friction source",
+            "Possible explanation: ambiguous or unclassified context",
         )
 
     # Fallback for general negative or unclassified tension
@@ -136,12 +155,12 @@ def classify_appraisal(user_text: str) -> Tuple[str, str, str, str]:
         "DISTRESS",
         "UNSPECIFIED_TENSION",
         "OUTDOOR_WALK",
-        "Unspecified acute tension",
+        "Possible explanation: unspecified acute tension",
     )
 
 
 class DialogueSession:
-    """Manages conversational check-in adhering to <= 3 turn bounds."""
+    """Manages conversational check-in strictly adhering to <= max_turns bounds."""
 
     def __init__(
         self,
@@ -162,6 +181,7 @@ class DialogueSession:
         self.attributed_cause: Optional[str] = None
         self.prescribed_action: Optional[str] = None
         self.subjective_rating: Optional[int] = None
+        self.action_accepted: Optional[bool] = None
 
     def start(self) -> str:
         """Turn 1 (Coach): Dispatch opening observer check-in."""
@@ -183,6 +203,11 @@ class DialogueSession:
         if subjective_rating is not None:
             self.subjective_rating = max(1, min(10, subjective_rating))
 
+        # Check action acceptance
+        acc = detect_action_acceptance(user_text)
+        if acc is not None:
+            self.action_accepted = acc
+
         self.transcript.append({
             "turn": self.turn_count,
             "speaker": "user",
@@ -192,7 +217,7 @@ class DialogueSession:
 
         # Anti-rumination circuit breaker check
         if detect_rumination(user_text):
-            self.turn_count += 1
+            self.turn_count = min(self.turn_count + 1, self.max_turns)
             self.status = "CIRCUIT_BREAKER_TRIGGERED"
             self.appraisal_category = "DISTRESS"
             self.cause_id = "RUMINATION_SPIRAL"
@@ -209,8 +234,15 @@ class DialogueSession:
 
         category, cause_id, int_id, cause_text = classify_appraisal(user_text)
 
-        # Allow exactly 1 clarification when UNCERTAIN and turn headroom permits
-        if category == "UNCERTAIN" and not self.clarification_asked and self.turn_count < self.max_turns:
+        # Allow clarification ONLY if there is headroom for both clarification AND closing message!
+        # Headroom requires: self.turn_count + 1 < self.max_turns
+        can_clarify = (
+            category == "UNCERTAIN"
+            and not self.clarification_asked
+            and (self.turn_count + 1 < self.max_turns)
+        )
+
+        if can_clarify:
             self.turn_count += 1
             self.clarification_asked = True
             clarifying_msg = (
@@ -225,10 +257,9 @@ class DialogueSession:
             })
             return clarifying_msg
 
-        # Resolve appraisal and commit to 1 micro-action
-        self.turn_count += 1
+        # Final closure: advance turn and conclude session
+        self.turn_count = min(self.turn_count + 1, self.max_turns)
         self.status = "COMPLETED"
-        # Preserve UNCERTAIN if user remained ambiguous after clarification!
         self.appraisal_category = category
         self.cause_id = cause_id
         self.intervention_id = int_id
@@ -262,6 +293,7 @@ class DialogueSession:
             "intervention_id": self.intervention_id,
             "intervention_type": self.prescribed_action,
             "subjective_rating": self.subjective_rating,
+            "action_accepted": self.action_accepted,
             "turn_count": self.turn_count,
             "max_turns": self.max_turns,
             "transcript": self.transcript,
@@ -283,7 +315,7 @@ def run_dialogue(
         print(f"\n[Coach Turn 1]: {opening}")
 
     resp_idx = 0
-    while session.status == "ACTIVE" and session.turn_count <= max_turns:
+    while session.status == "ACTIVE" and session.turn_count < max_turns:
         if interactive:
             try:
                 user_msg = input(f"[User Turn {session.turn_count}]: ").strip()

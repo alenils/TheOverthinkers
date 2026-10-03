@@ -25,3 +25,5 @@ node_modules/
 # Agent local state
 .mimocode/
 .commandcode/
+.runtime/
+.state/

@@ -136,9 +136,10 @@ flowchart TD
 
 * **What Ships:**
   * Initial `Profile/` templates: `SOUL.md` (Observer), `USER.md` (scaffold), `MEMORY.md`.
-  * Mock anomaly trigger script (`scripts/simulate_trigger.py`).
+  * Messaging gateway dispatcher (`scripts/messaging_gateway.py`) with correlation IDs, reply TTL, and concurrency locking.
+  * Anomaly trigger simulation (`scripts/simulate_trigger.py`) labeling mock alerts explicitly.
   * Outbound check-in using self-distanced observer framing:
-    > *"Morning. Biometrics show an autonomic dip. Looking at your day from the outside, what's taking up your bandwidth?"*
+    > *"[Simulated Alert] Morning. Biometrics show an autonomic dip. Looking at your day from the outside, what's taking up your bandwidth?"*
   * User reply capture, concise acknowledgment, and immediate session termination ($\le 2$ turns).
 * **80/20 Leverage:** Confirms user engagement, channel routing, and prompt tone without depending on live health APIs.
 * **Highlander Pattern Adopted:** Strict anti-verbosity ceiling; single-question intake; conversation hard-stop.
@@ -159,12 +160,13 @@ flowchart TD
     * Integration of Highlander's `samsung-health-import` (reads Samsung Health export zips) and `garmin-import` (reads Garmin JSON + FIT exports).
     * Normalized extraction view producing daily tuples: `{date, hrv_rmssd, resting_hr, sleep_fragmentation, workout_strain_score}`.
   * **`skills/detect-baseline/SKILL.md` + calculation helper `scripts/baseline_math.py`:**
-    * **Rolling Baseline Engine:** Computes 14–28 day rolling mean and standard deviation ($\mu \pm 1.5\sigma$) on HRV and sleep fragmentation. Triggers exclusively on **slope breaks**.
+    * **Rolling Baseline Engine:** Computes 14–28 day rolling mean and standard deviation ($\mu \pm 1.5\sigma$) and step-change trajectory deltas on HRV and sleep fragmentation. Flags zero-variance data as insufficient to prevent spurious alerts.
     * **Workout Confounder Filter:** Cross-checks previous day's athletic load / strain from Samsung/Garmin.
       * If strain jumped significantly $\rightarrow$ Tag as *Physical Recovery Strain*, log recovery status, stay silent.
+      * If workout records are missing $\rightarrow$ Tag as *Workout Data Missing Unverified*, surfacing uncertainty.
       * If no workout confounder $\rightarrow$ Dispatches anomaly trigger to Gate 2.
     * **Silence Default:** Maximum 1 check-in per day; zero alerts if metrics are within normal variance.
-* **80/20 Leverage:** Eliminates 70%+ of spurious alerts caused by gym sessions or temporary statistical noise.
+* **80/20 Leverage:** Filters out athletic fatigue spikes caused by high-strain workout days, reducing spurious mental stress alerts while isolating genuine unconfounded anomalies.
 * **Highlander Pattern Adopted:** "Compare against own baseline, never population norm"; adversarial evidence filter; watch-folder export ingestion.
 * **Ship / Acceptance Criteria:**
   * [ ] Sample Samsung Health export zip and Garmin export zip parse into local SQLite without errors.
@@ -214,9 +216,11 @@ flowchart TD
   * **Next-Day Verification:** Morning cron inspects subsequent night's HRV/sleep data:
     * Did HRV rebound toward rolling mean (within $\mu \pm 1.0\sigma$)?
     * Did sleep fragmentation decrease?
+    * Automatically expires stale unverified records older than 7 days (`EXPIRED_NO_DATA`).
   * **Personal Model Adaptation & Memory Writeback:**
-    * Updates `MEMORY.md` with verified correlations (*"Physiological sigh correlated with +14% HRV rebound for work deadlines"*).
-    * Weekly 1-line trend recap (*"Taking a 5-min walk correlated with 15% better HRV recovery than task reprioritization"*).
+    * Updates `MEMORY.md` under context rent with observed associations (requiring $N \ge 3$ trials before habit aggregation).
+    * Keeps runtime outcome data, populated memories, and state outside the tracked git checkout.
+    * Weekly 1-line trend recap.
 * **80/20 Leverage:** Provides empirical accountability—verifying that "help" translates into measurable physical recovery.
 * **Highlander Pattern Adopted:** Outcome ledger CLI; automated reflection; writeback to persistent memory under strict rent rule.
 * **Ship / Acceptance Criteria:**

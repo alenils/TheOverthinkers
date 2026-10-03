@@ -253,7 +253,7 @@ def verify_next_day_recovery(
 
 
 def get_ledger_report(db_path: Path) -> Dict[str, Any]:
-    """Generate statistical summary of recorded and verified interventions."""
+    """Generate statistical summary of recorded, verified, and expired interventions."""
     conn = init_ledger_db(db_path)
     conn.row_factory = sqlite3.Row
 
@@ -262,8 +262,16 @@ def get_ledger_report(db_path: Path) -> Dict[str, Any]:
     conn.close()
 
     total = len(all_rows)
-    verified = [r for r in all_rows if r["rebound_status"] != "PENDING_VERIFICATION"]
+    verified = [
+        r for r in all_rows
+        if r["rebound_status"] in ("REBOUND_CONFIRMED", "PARTIAL_REBOUND", "NO_REBOUND")
+    ]
     confirmed = [r for r in verified if r["rebound_status"] == "REBOUND_CONFIRMED"]
+    expired = [r for r in all_rows if r["rebound_status"] == "EXPIRED_NO_DATA"]
+    pending = [r for r in all_rows if r["rebound_status"] == "PENDING_VERIFICATION"]
+
+    dates = [r["date"] for r in all_rows if r["date"] is not None]
+    date_range = f"{min(dates)} to {max(dates)}" if dates else "none"
 
     # Group by intervention_id or intervention_type
     by_intervention: Dict[str, Dict[str, Any]] = {}
@@ -290,6 +298,7 @@ def get_ledger_report(db_path: Path) -> Dict[str, Any]:
         avg_rating = round(sum(v["ratings"]) / len(v["ratings"]), 1) if v["ratings"] else None
         efficacy_summary[k] = {
             "total_trials": v["count"],
+            "has_minimum_sample": v["count"] >= 3,
             "success_rate_pct": success_pct,
             "avg_rebound_delta_sigma": avg_delta,
             "avg_subjective_rating": avg_rating,
@@ -299,13 +308,16 @@ def get_ledger_report(db_path: Path) -> Dict[str, Any]:
         "total_entries": total,
         "verified_entries": len(verified),
         "confirmed_rebounds": len(confirmed),
+        "expired_entries": len(expired),
+        "pending_entries": len(pending),
+        "date_range": date_range,
         "overall_success_rate_pct": round((len(confirmed) / len(verified) * 100.0), 1) if verified else 0.0,
         "interventions": efficacy_summary,
     }
 
 
 def reflect_to_memory(db_path: Path, memory_path: Path) -> str:
-    """Update Profile/MEMORY.md with verified efficacy insights under strict context rent."""
+    """Update Profile/MEMORY.md with observed follow-up associations under strict context rent."""
     report = get_ledger_report(db_path)
     if not memory_path.is_file():
         raise FileNotFoundError(f"Memory document not found: {memory_path}")
@@ -330,20 +342,27 @@ def reflect_to_memory(db_path: Path, memory_path: Path) -> str:
             rate = stats["success_rate_pct"]
             trials = stats["total_trials"]
             sign = "+" if delta >= 0 else ""
-            lines.append(
-                f"* **{label}:** Correlated with {sign}{delta}σ autonomic rebound ({rate:.0f}% recovery rate over {trials} trials)."
-            )
+
+            if stats["has_minimum_sample"]:
+                lines.append(
+                    f"* **{label}:** Associated with {sign}{delta}σ follow-up rebound ({rate:.0f}% recovery rate over {trials} verified observations)."
+                )
+            else:
+                lines.append(
+                    f"* **{label}:** Observed in {trials} follow-up trial(s) (preliminary delta {sign}{delta}σ; sample too small for trend conclusion)."
+                )
 
     new_section_content = (
-        "## Intervention Efficacy Ledger (Verified Biometric Correlations)\n\n"
-        "Closed-loop empirical correlations between prescribed micro-actions and subsequent autonomic recovery:\n\n"
+        "## Intervention Follow-Up Ledger (Observed Biometric Associations)\n\n"
+        f"Empirical follow-up observations (Date range: {report.get('date_range', 'n/a')}, "
+        f"Verified: {report.get('verified_entries', 0)}, Expired: {report.get('expired_entries', 0)}):\n\n"
         + "\n".join(lines)
         + "\n"
     )
 
     content = memory_path.read_text(encoding="utf-8")
-    # Preserve horizontal rules and surrounding sections cleanly
-    pattern = r"## Intervention Efficacy Ledger[^\n]*\n.*?(?=\n---\n|\n## |\Z)"
+    # Match either title and preserve horizontal rules
+    pattern = r"## Intervention (?:Efficacy|Follow-Up) Ledger[^\n]*\n.*?(?=\n---\n|\n## |\Z)"
     if re.search(pattern, content, flags=re.DOTALL):
         updated = re.sub(pattern, new_section_content.rstrip(), content, count=1, flags=re.DOTALL)
     else:
@@ -354,13 +373,13 @@ def reflect_to_memory(db_path: Path, memory_path: Path) -> str:
 
 
 def generate_weekly_recap(db_path: Path) -> str:
-    """Generate a single 1-line trend recap from verified ledger data."""
+    """Generate a single 1-line trend recap adhering to minimum sample rules."""
     report = get_ledger_report(db_path)
     interventions = report.get("interventions", {})
     verified_count = report.get("verified_entries", 0)
 
     if verified_count == 0 or not interventions:
-        return "Weekly Recap: Zero verified anomalies this week; vitals maintained steady baseline."
+        return "Weekly Recap: Zero verified anomaly follow-ups this week; vitals maintained steady baseline."
 
     sorted_ints = sorted(
         interventions.items(),
@@ -371,18 +390,25 @@ def generate_weekly_recap(db_path: Path) -> str:
     best_name = best_id.replace("_", " ").title()
     delta = best_stats["avg_rebound_delta_sigma"]
     sign = "+" if delta >= 0 else ""
+    trials = best_stats["total_trials"]
 
-    if len(sorted_ints) > 1:
+    if not best_stats["has_minimum_sample"]:
+        return (
+            f"Weekly Recap: {verified_count} follow-up check-in(s) recorded "
+            f"(preliminary observations; awaiting >=3 trials per habit)."
+        )
+
+    if len(sorted_ints) > 1 and sorted_ints[1][1]["has_minimum_sample"]:
         second_id, second_stats = sorted_ints[1]
         second_name = second_id.replace("_", " ").title()
         return (
-            f"Weekly Recap: {best_name} correlated with {sign}{delta}σ rebound, "
-            f"outperforming {second_name} across {verified_count} closed-loop trials."
+            f"Weekly Recap: {best_name} associated with {sign}{delta}σ follow-up rebound, "
+            f"compared to {second_name} across {verified_count} verified trials."
         )
 
     return (
-        f"Weekly Recap: {best_name} led autonomic recovery with an average {sign}{delta}σ rebound "
-        f"across {verified_count} trials."
+        f"Weekly Recap: {best_name} associated with {sign}{delta}σ follow-up rebound "
+        f"across {trials} verified trials."
     )
 
 

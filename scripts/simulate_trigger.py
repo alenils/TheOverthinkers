@@ -15,6 +15,9 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, List
+import uuid
+
+import messaging_gateway
 
 DEFAULT_OPENING = (
     "Morning. Biometrics show an autonomic dip. "
@@ -156,7 +159,7 @@ def run_session(
     p_dir = profile_dir if profile_dir is not None else (root / "Profile")
     profile = load_profile(p_dir)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now().astimezone()
     date_str = anomaly_data.get("date", now.strftime("%Y-%m-%d"))
 
     # 1. Quiet Hours Enforcement
@@ -169,53 +172,63 @@ def run_session(
                 "date": date_str,
             }
 
-    # 2. Silence by default / once-per-day enforcement
+    # 2. Concurrency-Safe Silence by Default / Once-Per-Day Enforcement
     s_path = state_file if state_file is not None else (root / ".state" / "dispatch_state.json")
-    if not ignore_daily_limit:
-        if not check_daily_dispatch(s_path, date_str):
-            return {
-                "status": "SUPPRESSED_ALREADY_DISPATCHED",
-                "reason": f"Proactive check-in already dispatched for {date_str}",
-                "date": date_str,
-            }
+    lock_path = s_path.with_suffix(".lock")
 
-    turns: List[Dict[str, str]] = []
+    with messaging_gateway.ConcurrencyLock(lock_path):
+        if not ignore_daily_limit:
+            if not check_daily_dispatch(s_path, date_str):
+                return {
+                    "status": "SUPPRESSED_ALREADY_DISPATCHED",
+                    "reason": f"Proactive check-in already dispatched for {date_str}",
+                    "date": date_str,
+                }
 
-    # Turn 1: Outbound check-in
-    turn1_msg = DEFAULT_OPENING
-    turns.append({"turn": 1, "speaker": "coach", "message": turn1_msg})
+        dispatcher = messaging_gateway.ChannelDispatcher(channel="hermes_cli")
+        session_id = str(uuid.uuid4())
+        is_mock = anomaly_data.get("is_simulated", True)
 
-    if interactive:
-        print(f"[Coach Turn 1]: {turn1_msg}")
-        try:
-            user_input = input("[User Response]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            user_input = ""
-    else:
-        user_input = (
-            mock_reply.strip()
-            if mock_reply is not None
-            else "I have a major deadline today and three back-to-back reviews."
-        )
+        turns: List[Dict[str, str]] = []
 
-    turns.append({"turn": 1, "speaker": "user", "message": user_input})
+        # Turn 1: Outbound check-in (explicitly labeled if simulated)
+        turn1_msg = dispatcher.format_outbound_text(DEFAULT_OPENING, is_simulated=is_mock)
+        outbound_evt = dispatcher.dispatch(turn1_msg, session_id=session_id, is_simulated=is_mock)
+        turns.append({"turn": 1, "speaker": "coach", "message": turn1_msg, "event_id": outbound_evt.event_id})
 
-    # Turn 2: Concise observer acknowledgment + single micro-action
-    turn2_msg = generate_observer_reply(user_input, soul_content=profile.get("SOUL.md"))
-    turns.append({"turn": 2, "speaker": "coach", "message": turn2_msg})
+        if interactive:
+            print(f"[Coach Turn 1]: {turn1_msg}")
+            try:
+                user_input = input("[User Response]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                user_input = ""
+        else:
+            user_input = (
+                mock_reply.strip()
+                if mock_reply is not None
+                else "I have a major deadline today and three back-to-back reviews."
+            )
 
-    if interactive:
-        print(f"[Coach Turn 2]: {turn2_msg}")
-        print("[Session Terminated — Hard turn cap reached]")
+        reply_evt = dispatcher.record_reply(session_id, user_input)
+        turns.append({"turn": 1, "speaker": "user", "message": user_input, "event_id": reply_evt.event_id})
 
-    # Record dispatch upon successful completion
-    if not ignore_daily_limit:
-        record_dispatch(s_path, date_str)
+        # Turn 2: Concise observer acknowledgment + single micro-action
+        turn2_msg = generate_observer_reply(user_input, soul_content=profile.get("SOUL.md"))
+        turns.append({"turn": 2, "speaker": "coach", "message": turn2_msg})
+
+        if interactive:
+            print(f"[Coach Turn 2]: {turn2_msg}")
+            print("[Session Terminated — Hard turn cap reached]")
+
+        # Record dispatch upon successful completion while holding the lock
+        if not ignore_daily_limit:
+            record_dispatch(s_path, date_str)
 
     result: Dict[str, Any] = {
         "status": "TERMINATED",
         "turn_count": 2,
         "max_turns": 2,
+        "session_id": session_id,
         "timestamp": now.isoformat(),
         "anomaly": anomaly_data,
         "profile_loaded": list(profile.keys()),

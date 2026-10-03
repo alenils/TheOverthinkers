@@ -44,6 +44,34 @@ class TestGate2Dialogue(unittest.TestCase):
         self.assertEqual(summary["cause_id"], "ACUTE_THREAT")
         self.assertEqual(summary["intervention_id"], "PHYSIOLOGICAL_SIGH")
 
+    def test_low_control_with_deadline_maps_to_distress(self):
+        # Explicit reproduction test: 'My deadline is impossible and I have no control'
+        summary = dialogue_engine.run_dialogue(
+            anomaly_payload=self.anomaly_payload,
+            mock_responses=["My deadline is impossible and I have no control."],
+        )
+        self.assertEqual(summary["status"], "COMPLETED")
+        self.assertEqual(summary["appraisal_category"], "DISTRESS")
+        self.assertEqual(summary["cause_id"], "ACUTE_THREAT")
+        self.assertEqual(summary["intervention_id"], "PHYSIOLOGICAL_SIGH")
+
+    def test_max_turns_two_budget_respected(self):
+        # Explicit reproduction test: max_turns=2 with ambiguous inputs must not exceed 2 turns!
+        summary = dialogue_engine.run_dialogue(
+            anomaly_payload=self.anomaly_payload,
+            mock_responses=["idk", "idk"],
+            max_turns=2,
+        )
+        self.assertEqual(summary["status"], "COMPLETED")
+        self.assertLessEqual(summary["turn_count"], 2)
+
+    def test_action_acceptance_detection(self):
+        summary = dialogue_engine.run_dialogue(
+            anomaly_payload=self.anomaly_payload,
+            mock_responses=["Sounds good, will do that right away."],
+        )
+        self.assertEqual(summary["action_accepted"], True)
+
     def test_anxiety_maps_to_distress(self):
         summary = dialogue_engine.run_dialogue(
             anomaly_payload=self.anomaly_payload,

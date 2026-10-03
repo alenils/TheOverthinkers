@@ -61,6 +61,8 @@ class TestGate0Bootstrap(unittest.TestCase):
         self.assertEqual(res["turn_count"], 2)
         self.assertEqual(len(res["transcript"]), 3)
         self.assertIn("SOUL.md", res["profile_loaded"])
+        self.assertIn("[Simulated Alert]", res["transcript"][0]["message"])
+        self.assertIn("event_id", res["transcript"][0])
 
         # Second dispatch on the same date should be suppressed (once-per-day rule)
         res_dup = simulate_trigger.run_session(
